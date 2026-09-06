@@ -1,0 +1,186 @@
+schema_name: Sofia base map
+schema_description: >
+  Minimal OSM-only vector tile schema for the Sofia pilot map: buildings (with
+  height for fill-extrusion), roads, landuse/landcover, water, and one admin
+  boundary line. Deliberately avoids Natural Earth / water-polygons background
+  datasets (not needed for a single-city, high-zoom map, and unreachable from
+  this sandbox's network allowlist).
+  Attribute policy: every attribute below is checked against actual use in
+  web/js/map-style.js and web/js/map-search.js (paint expressions, filters,
+  queryRenderedFeatures) before being kept. Anything not read by the client is
+  left out — it would just be bytes shipped on every pan/zoom for no visual
+  effect. Add an attribute back only once a specific feature needs it.
+sources:
+  osm:
+    type: osm
+    url: "geofabrik:sofia"
+    local_path: "raw/sofia.osm.pbf"
+
+layers:
+  - id: building
+    features:
+      - source: osm
+        geometry: polygon
+        include_when:
+          building: __any__
+        attributes:
+          # 'name' still dropped: the map-click popup shows the name it gets
+          # back from the /api/hit-test SQL lookup, not from the vector tile.
+          # 'housenumber' added (2026-09-05, addr display): needed to label
+          # house numbers directly on the map at close zoom — this is the
+          # raw addr:housenumber tag on the building way itself (~39,500 of
+          # 132,920 buildings carry it directly), not the nearest-street
+          # imputation `sofia.db`'s search index does for addresses that
+          # only have a housenumber node nearby — good enough for an on-map
+          # label, no need to duplicate that join here.
+          - key: building
+          - key: height
+            type: double
+            value:
+              tag_value: height
+          - key: levels
+            type: double
+            value:
+              tag_value: building:levels
+          - key: housenumber
+            value:
+              tag_value: addr:housenumber
+        # Raw height/levels tags are passed through as-is; the final
+        # extrusion height (height -> levels*3 -> default-by-type) is
+        # computed client-side in the MapLibre style expression instead of
+        # here, since the YAML arithmetic/coalesce expressions in this
+        # Planetiler schema DSL proved unreliable in testing (most features
+        # came out with no computed height at all).
+        min_zoom: 13
+
+  - id: water
+    features:
+      # Only the water POLYGON is ever styled (flat fill-color, no
+      # data-driven expression, so no attribute is needed at all here). The
+      # waterway LINE feature (small rivers/streams as OSM lines rather than
+      # riverbank polygons) had no matching style layer — a "fill" layer
+      # can't render LineString geometry — so it was being shipped on every
+      # tile from z9 up and never drawn. Dropped for now; add a proper `line`
+      # style layer for it later if visible streams/rivers are wanted.
+      - source: osm
+        geometry: polygon
+        include_when:
+          natural: water
+        attributes: []
+        min_zoom: 4
+
+  - id: place
+    features:
+      # Sofia's named residential complexes/neighbourhoods ("квартали" —
+      # ж.к. Младост, ж.к. Люлин, etc, 2026-09-05) — the level between
+      # "whole city" and "single street" that was missing on the map.
+      # OSM carries these as place=suburb/quarter/neighbourhood, tagged on
+      # BOTH a point node and (often) a relation boundary for the same
+      # name; `geometry: point` only pulls the node, so each quarter is one
+      # label, not two. 216 such nodes in this extract — small enough that
+      # min_zoom doesn't need tiering the way roads/buildings do.
+      - source: osm
+        geometry: point
+        include_when:
+          place: [suburb, quarter, neighbourhood]
+        attributes:
+          - key: name
+        min_zoom: 10
+
+  - id: landuse
+    features:
+      # Raised from 8 to 10/11: at city-overview zooms these area polygons
+      # (with unsimplified OSM-detail boundaries) were the single heaviest
+      # layer per tile (up to ~96KB at z10) — not worth it before you're
+      # zoomed in enough to see individual blocks/parks anyway.
+      - source: osm
+        geometry: polygon
+        include_when:
+          landuse: [residential, commercial, industrial, retail, cemetery, construction]
+        attributes:
+          - key: landuse
+        min_zoom: 10
+      - source: osm
+        geometry: polygon
+        include_when:
+          leisure: [park, garden, pitch, stadium, playground]
+        attributes:
+          - key: leisure
+        min_zoom: 11
+      - source: osm
+        geometry: polygon
+        include_when:
+          natural: [wood, scrub, grassland, wetland]
+        attributes:
+          - key: natural
+        min_zoom: 10
+
+  - id: transportation
+    features:
+      # Tiered by road class instead of one flat min_zoom for every highway
+      # value: without this, mid/low zoom tiles carried full residential +
+      # service + footway density (streets=95,749 total) and were 5-10x
+      # heavier than they needed to be. Each tier below only appears once
+      # you've zoomed in enough to plausibly want that level of street
+      # detail — same convention OpenMapTiles/most basemaps use.
+      # Attributes were trimmed to just 'highway' in round 2 (ref/oneway/
+      # surface stay dropped — nothing reads them). 'name' is back
+      # (2026-09-05, addr display) on every tier except the last: street
+      # names are exactly what was missing on the map itself (search could
+      # find a street, but the map never labeled it), and ref/oneway/
+      # surface still have no consumer. Left off the lowest tier
+      # (service/track/footway/...) on purpose — those are rarely named in
+      # OSM and, where they are, labeling them would just add clutter at
+      # the zoom they already appear at.
+      - source: osm
+        geometry: line
+        include_when:
+          highway: [motorway, trunk, motorway_link, trunk_link]
+        attributes:
+          - key: highway
+          - key: name
+        min_zoom: 6
+      - source: osm
+        geometry: line
+        include_when:
+          highway: [primary, primary_link]
+        attributes:
+          - key: highway
+          - key: name
+        min_zoom: 9
+      - source: osm
+        geometry: line
+        include_when:
+          highway: [secondary, secondary_link, tertiary, tertiary_link]
+        attributes:
+          - key: highway
+          - key: name
+        min_zoom: 11
+      - source: osm
+        geometry: line
+        include_when:
+          highway: [unclassified, residential, living_street, road]
+        attributes:
+          - key: highway
+          - key: name
+        min_zoom: 13
+      - source: osm
+        geometry: line
+        include_when:
+          highway: [service, track, pedestrian, footway, path, steps, cycleway, bridleway, corridor]
+        attributes:
+          - key: highway
+        min_zoom: 15
+
+  # No "boundary" layer here anymore. OSM's tagged admin_level relations
+  # inside this extract don't cleanly give "Sofia's outline": admin_level=9
+  # is 121 separate polygons (Sofia's raioni + other units — the dashed
+  # clutter reported on 2026-09-05), and admin_level=8 turned out to be 73
+  # separate polygons too (neighbouring municipalities' sub-units), not one
+  # shape. The one outline that's actually correct is the Stolichna
+  # Community boundary already used to crop this whole extract
+  # (raw/sofia_boundary.geojson, from Overpass relation 7276261) — that's
+  # shipped as its own small simplified GeoJSON (see build_boundary.py) and
+  # loaded directly by the client (web/js/map-style.js), not through this
+  # tileset. Districts/settlements stay fully searchable via sofia.db as
+  # before; they were never drawn from here either.

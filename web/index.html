@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Карта Софии</title>
+  <link rel="stylesheet" href="css/maplibre-gl.css" />
+  <link rel="stylesheet" href="css/map-search.css" />
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="map-search-workspace js-map-search-workspace" aria-label="Поиск по карте Софии">
+    <aside class="map-search-results" aria-live="polite">
+      <div class="map-search-results__head">
+        <h1>Карта Софии</h1>
+        <div class="map-search-results__meta">
+          <span class="js-map-result-count">Поиск объектов и адресов</span>
+          <button class="map-search-share js-map-share" type="button" hidden>Получить ссылку</button>
+          <span class="map-search-share-status js-map-share-status" role="status" hidden></span>
+        </div>
+      </div>
+      <div class="map-search-results__body js-map-results">
+        <div class="map-search-empty">Найдите адрес, улицу, район, остановку, маршрут или организацию.</div>
+      </div>
+    </aside>
+
+    <aside class="map-search-control">
+      <form class="js-map-search-form" role="search">
+        <label class="map-search-field">
+          <span class="visually-hidden">Поиск по карте</span>
+          <input class="js-map-search-input" type="search" autocomplete="off" placeholder="Адрес, место или маршрут" />
+          <button class="map-search-submit" type="submit" disabled>Найти</button>
+        </label>
+        <div class="map-search-filters" aria-label="Фильтры поиска">
+          <button class="is-active" type="button" data-filter="all">Всё</button>
+          <button type="button" data-filter="transport">Транспорт</button>
+          <button type="button" data-filter="organizations">Организации</button>
+          <button class="js-map-more-toggle" type="button" aria-expanded="false">Ещё</button>
+        </div>
+        <div class="map-search-more js-map-more" hidden>
+          <button type="button" data-filter="addresses" data-group="all">Адреса и дома</button>
+          <button type="button" data-filter="streets" data-group="all">Улицы</button>
+          <button type="button" data-filter="areas" data-group="all">Районы и округа</button>
+          <button type="button" data-filter="cities" data-group="all">Населённые пункты</button>
+          <button type="button" data-filter="metro" data-group="transport">Метро</button>
+          <button type="button" data-filter="stops" data-group="transport">Остановки</button>
+          <button type="button" data-filter="rail" data-group="transport">Ж/д станции и платформы</button>
+          <button type="button" data-filter="terminals" data-group="transport">Аэропорты и автовокзалы</button>
+          <button type="button" data-filter="routes" data-group="transport">Маршруты транспорта</button>
+          <button type="button" data-filter="rubrics" data-group="organizations">Рубрики организаций</button>
+        </div>
+        <label class="map-search-bounds"><input class="js-map-bounds" type="checkbox" /> Искать только в видимой области карты</label>
+        <button class="map-search-route-open js-map-route-open" type="button">Построить маршрут</button>
+      </form>
+    </aside>
+
+    <span class="visually-hidden js-map-click-status" role="status" aria-live="polite"></span>
+  </div>
+
+  <script src="js/maplibre-gl.js"></script>
+  <script src="js/pmtiles.js"></script>
+  <script src="js/map-style.js"></script>
+  <script src="js/map-search.js"></script>
+</body>
+</html>

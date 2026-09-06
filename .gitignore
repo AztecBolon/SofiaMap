@@ -1,0 +1,20 @@
+# Generated/rebuilt data — the server reassembles sofia.db from the
+# .gz.*.part chunks under data/ at first startup (server/src/db.js), and
+# the .pmtiles files are pipeline output. ~120MB total, none of it needs to
+# be versioned here — regenerate via the pipeline instead.
+data/
+
+# Node dependencies — reinstalled via `npm install` from package-lock.json.
+node_modules/
+
+# SQLite runtime files, in case data/ is ever un-ignored for some reason.
+*.db-shm
+*.db-wal
+
+# Scratch folder of files delivered into Claude conversations over time —
+# not part of the running app; canonical copies live in server/ and web/.
+Claude outputs/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
