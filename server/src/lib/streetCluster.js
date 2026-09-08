@@ -183,5 +183,6 @@ module.exports = {
   representativePoint,
   distancePointToGeometry,
   dedupeLabels,
+  allPoints,
   SAME_STREET_MAX_GAP_M,
 };

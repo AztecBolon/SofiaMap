@@ -15,6 +15,24 @@ sources:
     type: osm
     url: "geofabrik:sofia"
     local_path: "raw/sofia.osm.pbf"
+  # Smoothed lane counts (2026-09-07, per-lane rendering follow-up fix) —
+  # see pipeline/smooth_lanes.py. Raw OSM `lanes`/`lanes:forward`/
+  # `lanes:backward` are tagged per short digitized way, not per street,
+  # and jitter locally far more than any real lane change (e.g. бул.
+  # Витоша: 1,1,2,1,2,4,2,2,1,1,3,3,1,1 across consecutive 10-50m ways) —
+  # merge_line_strings below only merges ways whose attributes already
+  # match exactly, so it can't fix two adjacent ways that both have real,
+  # merely-noisy values. smooth_lanes.py reads the same parsed streets
+  # (sofia.db), chains same-name ways into corridors via shared endpoint
+  # coordinates, and replaces each way's forward/backward count with a
+  # length-weighted local median over ~120m of corridor — smoothing out
+  # short-run tagging noise while leaving genuine, sustained lane changes
+  # (which persist over many consecutive ways) intact. Only feeds the
+  # three lane-rendering tiers below; every other layer/tier still reads
+  # straight from `osm`.
+  osm_lanes:
+    type: geojson
+    local_path: "raw/sofia_lanes_smoothed.geojson"
 
 layers:
   - id: building
@@ -132,29 +150,59 @@ layers:
       # (service/track/footway/...) on purpose — those are rarely named in
       # OSM and, where they are, labeling them would just add clutter at
       # the zoom they already appear at.
-      - source: osm
+      #
+      # lanes/oneway/lanes_forward/lanes_backward added (2026-09-07,
+      # per-lane road rendering) on the three tiers this feature covers
+      # (motorway/trunk through tertiary — the classes with strong `lanes`
+      # coverage, see claude/lane-visualization.md).
+      #
+      # These three tiers read from `osm_lanes` (a generated GeoJSON, see
+      # that source's own comment above), not straight `osm` like every
+      # other layer in this file — the raw per-way `lanes`/`lanes:forward`/
+      # `lanes:backward` tags are too noisy way-to-way to render directly
+      # (see pipeline/smooth_lanes.py), so lanes_forward/lanes_backward
+      # here are already-smoothed absolute counts, not raw tag pass-
+      # through — no `tag_value` indirection needed, the GeoJSON property
+      # names already match. web/js/map-style.js still does the final
+      # forward/backward derivation client-side (this schema DSL's
+      # arithmetic/coalesce expressions were already found unreliable for
+      # the building-height computation above), it just receives cleaner
+      # input now.
+      - source: osm_lanes
         geometry: line
         include_when:
           highway: [motorway, trunk, motorway_link, trunk_link]
         attributes:
           - key: highway
           - key: name
+          - key: lanes
+          - key: oneway
+          - key: lanes_forward
+          - key: lanes_backward
         min_zoom: 6
-      - source: osm
+      - source: osm_lanes
         geometry: line
         include_when:
           highway: [primary, primary_link]
         attributes:
           - key: highway
           - key: name
+          - key: lanes
+          - key: oneway
+          - key: lanes_forward
+          - key: lanes_backward
         min_zoom: 9
-      - source: osm
+      - source: osm_lanes
         geometry: line
         include_when:
           highway: [secondary, secondary_link, tertiary, tertiary_link]
         attributes:
           - key: highway
           - key: name
+          - key: lanes
+          - key: oneway
+          - key: lanes_forward
+          - key: lanes_backward
         min_zoom: 11
       - source: osm
         geometry: line
@@ -171,6 +219,79 @@ layers:
         attributes:
           - key: highway
         min_zoom: 15
+    # Planetiler's own line-merge post-process (2026-09-07, per-lane road
+    # rendering follow-up) — NOT the arithmetic/coalesce DSL flagged
+    # unreliable elsewhere in this file; this is a dedicated built-in
+    # (FeatureMerge.mergeLineStrings) that joins adjacent LineStrings in
+    # this layer's output when they carry identical attributes.
+    # Sofia's OSM ways are cut at every junction, and a fork/merge between
+    # two named boulevards routinely leaves several-meter (sometimes
+    # sub-2m) stub ways mid-junction — each rendered as its own
+    # independent line by web/js/map-style.js's per-lane layers, which
+    # produced visible notches right at those stubs (see
+    # claude/lane-visualization.md). Merging same-attribute runs back into
+    # one continuous line removes most of those stub joins outright — a
+    # real gap in `lanes` between two DIFFERENT physical roads (a genuine
+    # merge point) still won't merge, since the attributes genuinely
+    # differ, but that's an honest lane count change, not a rendering
+    # artifact. min_length: 0 means nothing gets dropped, only merged.
+    tile_post_process:
+      merge_line_strings:
+        min_length: 0
+        tolerance: 0.1
+        buffer: 4
+
+  - id: railway
+    features:
+      # Railway (2026-09-07, per user request "нанести жд и трамвайные
+      # линии"). Scoped to exactly the two literal tags first asked for:
+      # railway=rail (mainline/freight/industrial track, 823 ways in this
+      # extract) and railway=tram (Sofia's tram network, 643 ways). NOT
+      # included: disused/abandoned/construction/proposed/platform/etc
+      # (265+54+50+34+465 objects — historical or planned track, not
+      # something on the ground today). `name` kept even though coverage
+      # is low (67/823 rail, 0/643 tram, 277/418 subway) — the few lines
+      # that ARE named are worth labeling if the client ever wants to;
+      # costs nothing to carry through unused otherwise, same "attribute
+      # checked before being kept" policy as elsewhere in this file,
+      # except this one's kept as an exception because so many other
+      # schemas expect it as a matter of course.
+      #
+      # `service` added 2026-09-07 (follow-up: "стало много шума на
+      # удалённых масштабах") — yard/siding/spur/crossover trackage
+      # (depot fans, marshalling-yard ladders) is tagged `service=yard`/
+      # `siding`/`spur`/`crossover` right in OSM, distinct from ordinary
+      # through track (`service` empty). Coverage in this extract: rail
+      # 573/823 way tagged with one of these (70%!), tram 289/643 (45%),
+      # subway 129/418 (31%) — most of what looked like "noise" at a
+      # zoomed-out view was exactly this: real yard ladders/depot fans
+      # rendered at the same zoom as the through lines they branch off
+      # of. web/js/map-style.js uses this to gate yard/depot trackage to
+      # a much closer zoom than the main lines.
+      - source: osm
+        geometry: line
+        include_when:
+          railway: [rail, tram]
+        attributes:
+          - key: railway
+          - key: name
+          - key: service
+        min_zoom: 11
+      # Metro (2026-09-07, follow-up request, drawn semi-transparent since
+      # it's almost entirely underground — see web/js/map-style.js's
+      # "subway" layer comment). Separate min_zoom from rail/tram above:
+      # Sofia only has a handful of metro lines citywide, so it's legible
+      # (and worth showing) from a noticeably wider-out zoom than the
+      # much denser tram network.
+      - source: osm
+        geometry: line
+        include_when:
+          railway: [subway]
+        attributes:
+          - key: railway
+          - key: name
+          - key: service
+        min_zoom: 10
 
   # No "boundary" layer here anymore. OSM's tagged admin_level relations
   # inside this extract don't cleanly give "Sofia's outline": admin_level=9

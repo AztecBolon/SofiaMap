@@ -126,6 +126,12 @@
     pitchWithRotate: !lite,
     touchPitch: !lite,
   });
+  // Registers the transit stop/station icon sprites (map-style.js,
+  // stop-icons.js) as soon as the map instance exists — addImage() with
+  // raw pixel data is synchronous and doesn't need to wait for the style
+  // or its sources to finish loading, so this doesn't need to be inside
+  // map.on("load", ...) below.
+  registerStopIcons(map);
   map.addControl(new maplibregl.NavigationControl({ visualizePitch: !lite, showCompass: !lite }), "bottom-right");
   console.info(`[map] render quality: ${renderQuality}`);
 
@@ -662,7 +668,118 @@
   // -sized proxies over the same geometry — feature-state set through
   // either still drives the real, visible layers' own opacity/width, since
   // all of them key off the same `{source, sourceLayer, id}`.
-  const HOVER_LAYERS = ["buildings", "roads-hit", "place-labels-hit", "overlay-stops", "search-points", "search-clusters"];
+  // "overlay-stops-badge" added 2026-09-07 (stop icons revision 2, then
+  // kept through revision 3): tram_stop/bus_stop/bus_terminal moved off
+  // the old flat "overlay-stops" layer onto their own badge sprite (see
+  // buildStopsLayers() in map-style.js) — without this, hovering/clicking
+  // a bus or tram stop silently did nothing, since queryRenderedFeatures
+  // below only ever looked at the old layer id. (Revision 2 briefly split
+  // this into two stacked layers, "-badge"+"-glyph"; revision 3 merged
+  // them back into the one "-badge" layer below, so there's nothing else
+  // to add here now.)
+  // "overlay-stations" added 2026-09-08 (stop icons revision 4): metro/rail
+  // station badges were NEVER in this list, from the very first version of
+  // that layer — a separate, longer-standing gap than the badge/glyph split
+  // above, just never reported until now ("не кликаются и не реагируют при
+  // наведении"). Same fix shape as overlay-stops below: /api/hit-test
+  // already handles this fine server-side (`nearestStop` in
+  // server/src/routes/coord.js queries the whole `stops` table regardless
+  // of stop_type, so subway/rail rows resolve exactly like bus/tram ones) —
+  // this was purely a missing client-side wire-up.
+  const HOVER_LAYERS = ["buildings", "roads-hit", "place-labels-hit", "overlay-stations", "overlay-stops", "overlay-stops-badge", "search-points", "search-clusters"];
+  // 2026-09-08: point layers among the above (station/stop/search-result
+  // badges, as opposed to buildings/roads-hit/place-labels-hit's areas and
+  // lines) can legitimately sit a few metres from ANOTHER point layer's
+  // icon at the same spot — real transit data, not a bug: a bus stop is
+  // routinely right outside a metro station's own entrance, sharing a
+  // name ("пл. Орлов мост" bus stop, ~30m from "Орлов мост" metro station,
+  // confirmed via sofia.db — not a one-off, this is normal at interchange
+  // stops citywide) — and both layers draw with icon-allow-overlap/
+  // icon-ignore-placement:true, so both symbols really do render at
+  // overlapping pixels. `queryRenderedFeatures(point, {layers})[0]` picks
+  // whichever one happens to be on TOP in paint order (overlay-stops-badge
+  // is added after overlay-stations in buildStopsLayers(), so it always
+  // won) — NOT whichever one the cursor is actually closer to. That's the
+  // "выделяется не точно иконка" report: hovering right on the metro badge
+  // could highlight (and, on click, open) the nearby bus stop instead,
+  // whose own coordinate is metres away, so the highlight ring visibly
+  // misses the icon underneath the cursor.
+  //
+  // Fix: among the returned features, prefer whichever POINT feature's own
+  // coordinate projects closest to the actual cursor pixel — not simply
+  // the first one MapLibre's z-order handed back. Falls back to
+  // `features[0]` when no point feature is present (buildings/roads-hit/
+  // place-labels-hit don't stack this way at one pixel, so z-order is
+  // still the right tiebreak for those).
+  const HOVER_POINT_LAYERS = new Set(["overlay-stations", "overlay-stops", "overlay-stops-badge", "search-points", "search-clusters"]);
+  function pickHoverFeature(features, point) {
+    let best = null;
+    let bestDist = Infinity;
+    for (const f of features) {
+      if (!HOVER_POINT_LAYERS.has(f.layer.id) || f.geometry.type !== "Point") continue;
+      const screenPt = map.project(f.geometry.coordinates);
+      const dx = screenPt.x - point.x;
+      const dy = screenPt.y - point.y;
+      const d = dx * dx + dy * dy;
+      if (d < bestDist) {
+        bestDist = d;
+        best = f;
+      }
+    }
+    return best || features[0];
+  }
+  // 2026-09-08 revision 8 — hover highlight, take 2 ("подсвечивается не
+  // сама иконка... измени технологию", the report right after the
+  // pickHoverFeature fix above landed). Maps a stop/station's `stop_type`
+  // to the matching baked "*-hover" sprite (gen_stop_icons.py's
+  // render_hover — a highlight ring traced around that icon's OWN real
+  // silhouette, not an unrelated circle) and to a `kind` naming which of
+  // map-style.js's three icon-size expressions (STATION_ICON_SIZE/
+  // STOPBADGE_ICON_SIZE/STOPDOT_ICON_SIZE) applies — mirrors the exact
+  // same `stop_type` branches STATION_ICON/STOP_ICON/VEHICLE_GLYPH use
+  // there, so the highlight always matches the real icon actually drawn.
+  //
+  // 2026-09-08 revision 10 ("сделай иконки цветом линии" round 2): subway
+  // no longer points at a flat "metro-badge-hover" bake — that sprite
+  // doesn't exist any more (see gen_stop_icons.py's render_dilated
+  // comment: a fixed baked color can't represent a per-station line
+  // color). It now returns the REAL recolorable "metro-badge" sprite name
+  // plus its own `kind` ("station-metro", not "station") — map-style.js's
+  // hover-icon-metro-halo/hover-icon-metro layers use that kind to draw
+  // the halo ring and a second real, per-feature-colored "metro-badge"
+  // instance stacked on top, instead of one pre-baked composite. See the
+  // setHighlightForFeature call site below for where this station's own
+  // `line_color` gets carried along too, so the hovered instance is
+  // colored exactly the same as the real one underneath it.
+  //
+  // 2026-09-08 revision 11 (b): rail switched from "rail-ladder-hover" to
+  // "rail-badge-hover" — same sprite-rename as the real (non-hover) rail
+  // icon, see gen_stop_icons.py's draw_rail_pin comment.
+  //
+  // 2026-09-08 revision 12: subway's `lineSplit` branch (revision 11)
+  // removed again — it used to route the 13 real M1/M4 shared-trunk
+  // stations to a flat, pre-baked "metro-badge-split-hover" sprite, kept
+  // separate from the live per-feature "metro-badge" + METRO_ICON_COLOR_EXPR
+  // path because a split station's two colors aren't a single
+  // `line_color`. That flat bake turned out to be exactly the kind of
+  // GPU-minification-unreliable sprite this project already hit and fixed
+  // once before for the "M" glyph (revision 9): correct at some
+  // zooms/instances, stuck showing a stale/wrong render at others. Fixed
+  // the same way as revision 9 — stop baking, always return the plain
+  // live "metro-badge" (kind: "station-metro"); map-style.js's
+  // hover-icon-metro-half-a/-b layers (revision 12) now handle a hovered
+  // split station's two colors themselves, filtered on `line_split` on the
+  // pushed hoverIcon feature (see setHoverIcon's call site below) — the
+  // same live-SDF mechanism the non-hover "overlay-stations-split-a/-b"
+  // layers already use, not a second bake.
+  function stopHoverIcon(stopType) {
+    if (stopType === "subway") return { iconName: "metro-badge", kind: "station-metro" };
+    if (stopType === "rail") return { iconName: "rail-badge-hover", kind: "station" };
+    if (stopType === "tram_stop") return { iconName: "veh-tram-badge-hover", kind: "stopBadge" };
+    if (stopType === "bus_stop" || stopType === "bus_terminal") return { iconName: "veh-bus-badge-hover", kind: "stopBadge" };
+    if (stopType === "airport") return { iconName: "stop-triangle-hover", kind: "stopDot" };
+    return { iconName: "stop-dot-hover", kind: "stopDot" };
+  }
   // How long the pointer has to rest on one object before its popup
   // appears, and (symmetrically) how long it has to rest on a DIFFERENT
   // object before that popup is replaced — see the big comment above
@@ -715,6 +832,13 @@
     const src = map.getSource("hover");
     if (src) src.setData({ type: "FeatureCollection", features: features || [] });
   }
+  // Counterpart to setHoverGeometry, for the "hoverIcon" source/"hover-icon"
+  // layer (map-style.js) — stops/stations' own real-icon highlight, see
+  // stopHoverIcon() above.
+  function setHoverIcon(features) {
+    const src = map.getSource("hoverIcon");
+    if (src) src.setData({ type: "FeatureCollection", features: features || [] });
+  }
   // See map-style.js's `hoverLabel` source comment: text-size can't be
   // driven by feature-state (layout property), so an enlarged stand-in
   // label is drawn from here instead while the real one fades out.
@@ -751,7 +875,12 @@
   function clearHighlight() {
     if (!activeHighlight) return;
     if (activeHighlight.kind === "point") {
+      // Both sources share the "point" highlight kind (search points/
+      // clusters use `hover`, stops/stations use `hoverIcon` — see each
+      // source's own comment in map-style.js) — clearing both unconditionally
+      // is cheap and avoids having to also track which one is actually live.
       setHoverGeometry([]);
+      setHoverIcon([]);
     } else {
       for (const id of activeHighlight.ids) {
         map.setFeatureState({ source: "base", sourceLayer: activeHighlight.sourceLayer, id }, { hover: false });
@@ -873,10 +1002,29 @@
           properties: { kind: "road", name: props.name, size },
         }))
       );
-    } else if (layerId === "overlay-stops") {
-      // No feature ids in this tileset (see the "hover-point" layer's
+    } else if (layerId === "overlay-stations" || layerId === "overlay-stops" || layerId === "overlay-stops-badge") {
+      // No feature ids in this tileset (see the "hoverIcon" source's
       // comment in map-style.js) — geometry-in-a-source is the fallback.
-      setHoverGeometry([{ type: "Feature", geometry: f.geometry, properties: {} }]);
+      // ("overlay-stations" is a plain GeoJSON source now, not a tileset —
+      // its features do carry a `properties.id`, but not a top-level
+      // MapLibre `id` without a `promoteId` config this style doesn't set,
+      // so the same geometry fallback applies here too.)
+      // 2026-09-08 revision 8: pushes into `hoverIcon` (the real icon's own
+      // silhouette, see stopHoverIcon()) instead of the old generic
+      // fixed-radius circle — see that function's comment.
+      // 2026-09-08 revision 10: `line_color` carried through too — the
+      // hovered metro instance (map-style.js's hover-icon-metro layer)
+      // reads it via the same METRO_ICON_COLOR_EXPR the real station icon
+      // uses, so a hovered station is never a different color than its own
+      // un-hovered badge. undefined for rail/every other stop type, same
+      // as on the real feature — harmless, those layers don't read it.
+      // 2026-09-08 revision 12: `line_split` now passed through directly on
+      // the pushed feature (alongside `line_color`) rather than into
+      // stopHoverIcon() — map-style.js's hover-icon-metro-half-a/-b layers
+      // filter on it themselves, the same way "overlay-stations-split-a/-b"
+      // filter on the real feature's `line_split`. undefined for
+      // non-subway stop types, harmless — those layers don't read it.
+      setHoverIcon([{ type: "Feature", geometry: f.geometry, properties: { ...stopHoverIcon(props.stop_type), line_color: props.line_color, line_split: props.line_split } }]);
       activeHighlight = { kind: "point" };
     } else if (layerId === "search-points") {
       // Supercluster-managed source, same "no stable id to hang
@@ -1032,7 +1180,18 @@
     if (type === "company") {
       const obj = await apiObject("company", id);
       if (obj) appendCompanyDetails(obj);
-    } else if (type === "stop") {
+    } else if (type === "stop" || type === "metro" || type === "rail" || type === "terminal") {
+      // Same condition choose() already uses for a search-result row of
+      // these types (server/src/routes/object.js's /api/object/:type/:id
+      // only has a "stop" case — metro/rail/terminal are all rows in the
+      // same `stops` table, just with a nicer TYPE_LABEL for display, so
+      // the API call itself is always "stop" regardless of which of the
+      // four this was). This branch used to check only `type === "stop"`,
+      // which meant a hover-popup "Подробнее" click for a metro/rail/
+      // terminal object (unlike the exact same object reached via search)
+      // rendered the name but never fetched its route list — same bug
+      // class as the missing hover/click wiring above, just one level
+      // deeper (found while wiring up "overlay-stations").
       const obj = await apiObject("stop", id);
       if (obj) appendStopRoutes(obj);
     }
@@ -1065,11 +1224,26 @@
     // `confirmPopup` calls this, this returns without opening anything).
     if (layerId === "search-clusters") return;
 
-    // Buildings and stops carry no usable name in the vector tile itself —
-    // deliberately, see pipeline/sofia-schema.yml — so their popup content
-    // comes from the same /api/hit-test lookup the "click on empty map
-    // spot" handler above already uses, keyed by the hover point.
-    if (layerId === "buildings" || layerId === "overlay-stops") {
+    // "overlay-stations" (metro/rail) carries name/id/type directly in its
+    // own GeoJSON (see pipeline/dedup_stations.py) — unlike buildings/
+    // ordinary stops below, no /api/hit-test round trip needed, and
+    // deliberately so: hit-test resolves by nearest-point-within-~20m
+    // (coord.js's M2DEG2), but several deduped stations' own centroid sits
+    // 40-90m from the nearest raw stop row it was merged from (long
+    // platforms) — well past that radius, so hit-test would legitimately
+    // come back empty for exactly the points this layer draws.
+    if (layerId === "overlay-stations") {
+      const action = '<button class="map-hover-popup__link js-hover-more" type="button">Подробнее →</button>';
+      revealPopup(lngLat, hoverPopupHtml(props.name, TYPE_LABEL[props.type] || "", action));
+      bindHoverAction("object", { type: props.type, id: props.id, name: props.name });
+      return;
+    }
+
+    // Buildings and ordinary stops carry no usable name in the vector tile
+    // itself — deliberately, see pipeline/sofia-schema.yml — so their
+    // popup content comes from the same /api/hit-test lookup the "click on
+    // empty map spot" handler above already uses, keyed by the hover point.
+    if (layerId === "buildings" || layerId === "overlay-stops" || layerId === "overlay-stops-badge") {
       const seq = ++hoverSeq;
       revealPopup(lngLat, hoverPopupHtml("Загрузка…", ""));
       apiHitTest(lngLat.lat.toFixed(6), lngLat.lng.toFixed(6)).then((data) => {
@@ -1170,7 +1344,7 @@
       }
       return;
     }
-    handleHoverFeature(features[0], lngLat);
+    handleHoverFeature(pickHoverFeature(features, point), lngLat);
   }
 
   // `queryRenderedFeatures` isn't free, so it doesn't run on every
@@ -1222,11 +1396,19 @@
       confirmedPopupKey = null;
       hoverPopup.remove();
     }
-    const hoverHit = map.queryRenderedFeatures(e.point, { layers: HOVER_LAYERS })[0];
+    const hoverHit = pickHoverFeature(map.queryRenderedFeatures(e.point, { layers: HOVER_LAYERS }), e.point);
     if (hoverHit) {
       const layerId = hoverHit.layer.id;
       const props = hoverHit.properties || {};
-      if (layerId === "buildings" || layerId === "overlay-stops") {
+      // Same reasoning as showPopupContent's "overlay-stations" branch
+      // above: this layer's own GeoJSON already carries name/id/type, so
+      // it skips /api/hit-test (whose ~20m match radius several deduped
+      // stations' centroids fall outside of) entirely.
+      if (layerId === "overlay-stations") {
+        openObjectDetails({ type: props.type, id: props.id, name: props.name });
+        return;
+      }
+      if (layerId === "buildings" || layerId === "overlay-stops" || layerId === "overlay-stops-badge") {
         const data = await apiHitTest(e.lngLat.lat.toFixed(6), e.lngLat.lng.toFixed(6));
         const feature = data.features && data.features[0];
         if (feature) openObjectDetails({ type: feature.properties.type, id: feature.properties.id, name: feature.properties.name });

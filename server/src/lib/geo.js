@@ -35,4 +35,20 @@ function pointInGeometry(lon, lat, geometry) {
   return false;
 }
 
-module.exports = { pointInGeometry };
+// Equirectangular approximation, not true geodesic distance — same
+// simplification streetCluster.js already makes (see its own comment):
+// fine at Sofia's small extent (~20km across), and one reference latitude
+// for the metre-per-degree conversion is close enough everywhere in the
+// dataset. Shared here so every "nearest X to a point" feature (district
+// lookup, organizations near a building, stops near a building) uses one
+// consistent, cheap distance function instead of each re-deriving it.
+const REF_LAT_RAD = (42.7 * Math.PI) / 180;
+const M_PER_DEG_LAT = 111320;
+const M_PER_DEG_LON = 111320 * Math.cos(REF_LAT_RAD);
+function distanceMeters(lat1, lon1, lat2, lon2) {
+  const dx = (lon1 - lon2) * M_PER_DEG_LON;
+  const dy = (lat1 - lat2) * M_PER_DEG_LAT;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+module.exports = { pointInGeometry, distanceMeters };

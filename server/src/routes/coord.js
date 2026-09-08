@@ -2,6 +2,7 @@ const express = require("express");
 const db = require("../db");
 const { pointInGeometry } = require("../lib/geo");
 const { buildingKindLabel } = require("../lib/buildingKind");
+const { withDesignation } = require("../lib/streetDesignation");
 const {
   clusterStreetSegments,
   distancePointToGeometry,
@@ -69,7 +70,7 @@ router.get("/hit-test", (req, res) => {
           // also a housenumber to go with it; otherwise say what kind of
           // building this actually is.
           properties: {
-            name: b.name || (b.housenumber && [b.addr_street, b.housenumber].filter(Boolean).join(" "))
+            name: b.name || (b.housenumber && [withDesignation(b.addr_street), b.housenumber].filter(Boolean).join(" "))
               || buildingKindLabel(b.building),
             type: "address", url: null, id: b.id,
           },
@@ -222,13 +223,13 @@ router.get("/street/:id/houses", (req, res) => {
   const LIMIT = 300;
   const items = matched.slice(0, LIMIT).map((b) => ({
     id: b.id, type: "address",
-    name: b.name || [first.name, b.housenumber].filter(Boolean).join(" "),
+    name: b.name || [withDesignation(first.name), b.housenumber].filter(Boolean).join(" "),
     subtitle: b.housenumber ? `№ ${b.housenumber}` : "",
     lat: b.lat, lng: b.lon, map_key: `address:${b.id}`,
   }));
 
   res.json({
-    meta: { name: first.name, total: matched.length, returned: items.length, partial: matched.length > items.length },
+    meta: { name: withDesignation(first.name), total: matched.length, returned: items.length, partial: matched.length > items.length },
     items,
   });
 });

@@ -31,14 +31,27 @@ for r in cur:
     }))
 write_fc(f"{OUT}/overlay_organizations.geojson", feats)
 
-# ---- stops ----
+# ---- stops / stations (2026-09-07: split into two files/Tippecanoe
+# layers, not one) ----
+# Rail/subway STATIONS get their own icon shown "на всех масштабах" (every
+# zoom, per user request) with a name label — that needs `name` actually
+# kept in the tiles (the original single-layer build below dropped it via
+# `-x name`, since the old flat-dot style never read it) and a much lower
+# tileset minzoom than surface stops. Splitting into a separate,
+# low-cardinality (193 features citywide) vector layer keeps that low
+# minzoom cheap and leaves the existing bus/tram stop layer's zoom
+# gating/feature-dropping behavior (minzoom 14, `name` excluded) exactly as
+# it was tuned in the 2026-09-05 optimization round.
 cur = conn.execute("SELECT id, name, stop_type, network, lat, lon FROM stops")
-feats = []
+station_feats, stop_feats = [], []
 for r in cur:
-    feats.append(point_feature(r["lon"], r["lat"], {
-        "id": r["id"], "type": "stop", "stop_type": r["stop_type"], "name": r["name"], "network": r["network"] or "",
-    }))
-write_fc(f"{OUT}/overlay_stops.geojson", feats)
+    props = {"id": r["id"], "type": "stop", "stop_type": r["stop_type"], "name": r["name"], "network": r["network"] or ""}
+    if r["stop_type"] in ("rail", "subway"):
+        station_feats.append(point_feature(r["lon"], r["lat"], props))
+    else:
+        stop_feats.append(point_feature(r["lon"], r["lat"], props))
+write_fc(f"{OUT}/overlay_stations.geojson", station_feats)
+write_fc(f"{OUT}/overlay_stops.geojson", stop_feats)
 
 # ---- routes (approximate polyline through ordered stops) ----
 feats = []

@@ -6,9 +6,11 @@ const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
 const Database = require("better-sqlite3");
+const { applyPendingPatches } = require("./lib/applyPatches");
 
 const DATA_DIR = path.resolve(__dirname, "..", "..", "data");
 const DB_PATH = path.join(DATA_DIR, "sofia.db");
+const PATCHES_DIR = path.join(DATA_DIR, "patches");
 
 function reassembleIfNeeded() {
   if (fs.existsSync(DB_PATH)) return;
@@ -41,6 +43,12 @@ function reassembleIfNeeded() {
 }
 
 reassembleIfNeeded();
+
+// Small incremental data fixes ship as JSON files under data/patches/
+// instead of a whole new copy of the database (see lib/applyPatches.js
+// for why and the file format). Applied here, with a short-lived
+// writable connection, before the app opens its normal read-only one.
+applyPendingPatches(DB_PATH, PATCHES_DIR);
 
 const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
 db.pragma("query_only = ON");

@@ -1,5 +1,6 @@
 const express = require("express");
 const db = require("../db");
+const { withDesignation } = require("../lib/streetDesignation");
 
 const router = express.Router();
 
@@ -19,7 +20,7 @@ router.get("/rubric/:name", (req, res) => {
     id: r.id,
     type: "company",
     name: r.name,
-    subtitle: [r.addr_street, r.housenumber].filter(Boolean).join(" "),
+    subtitle: [withDesignation(r.addr_street), r.housenumber].filter(Boolean).join(" "),
     lat: r.lat,
     lng: r.lon,
     map_key: `company:${r.id}`,

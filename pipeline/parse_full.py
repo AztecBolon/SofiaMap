@@ -159,6 +159,13 @@ class Handler(osmium.SimpleHandler):
                 w.id, "way", tags.get("name", ""), tags.get("name:en", ""), tags["highway"],
                 tags.get("ref", ""), tags.get("oneway", ""), tags.get("surface", ""),
                 tags.get("lanes", ""), tags.get("maxspeed", ""),
+                # lanes:forward / lanes:backward — an explicit, uneven lane
+                # split for a two-way road (e.g. 3 total = 2 up + 1 down on a
+                # climbing-lane hill). Present on a minority of tagged ways;
+                # absent, the map-style lane renderer falls back to an even
+                # floor/ceil split of the plain `lanes` total (see
+                # web/js/map-style.js's lanes_fwd/lanes_bwd derivation).
+                tags.get("lanes:forward", ""), tags.get("lanes:backward", ""),
                 json.dumps(mapping(geom)), geom,
             ))
             return
@@ -231,7 +238,7 @@ def main():
     for idx, s in enumerate(named_streets):
         key = s[2].strip().lower()
         exact_index.setdefault(key, idx)
-    proj_geoms = [project_geom(s[11]) for s in named_streets]
+    proj_geoms = [project_geom(s[13]) for s in named_streets]
     tree = STRtree(proj_geoms) if proj_geoms else None
 
     matched_exact = matched_nearest = matched_none = 0
@@ -436,6 +443,7 @@ def main():
     CREATE TABLE streets (
       id INTEGER PRIMARY KEY, osm_id INTEGER, osm_type TEXT, name TEXT, name_en TEXT,
       highway TEXT, ref TEXT, oneway TEXT, surface TEXT, lanes TEXT, maxspeed TEXT,
+      lanes_forward TEXT, lanes_backward TEXT,
       geometry TEXT
     );
     CREATE TABLE buildings (
@@ -466,12 +474,23 @@ def main():
     CREATE TABLE districts (id INTEGER PRIMARY KEY, osm_id INTEGER, name TEXT, name_en TEXT, admin_level TEXT, lat REAL, lon REAL, geometry TEXT);
     CREATE TABLE settlements (id INTEGER PRIMARY KEY, osm_id INTEGER, name TEXT, name_en TEXT, admin_level TEXT, lat REAL, lon REAL, geometry TEXT);
     CREATE TABLE other_entities (tag_key TEXT, tag_value TEXT, osm_type TEXT, count INTEGER);
+    -- _applied_patches (server/src/lib/applyPatches.js) tracks which
+    -- data/patches/*.json fixes have already been applied to THIS db file,
+    -- by patch id — it's not one of this script's own tables, but a
+    -- full rebuild here recreates buildings/streets/etc. from scratch,
+    -- silently undoing whatever those patches changed (e.g. postcode
+    -- backfills) while leaving their ids marked "already applied". Left
+    -- alone, that combination makes the patches permanently skipped after
+    -- the very rebuild that most needs them re-run. Dropping it here means
+    -- a rebuilt db always starts with a clean slate, so every patch in
+    -- data/patches/ reapplies fresh the next time the server starts.
+    DROP TABLE IF EXISTS _applied_patches;
     """)
 
-    # h.streets rows are (osm_id, osm_type, name, name_en, highway, ref, oneway, surface, lanes, maxspeed, geojson_str, shapely_geom)
+    # h.streets rows are (osm_id, osm_type, name, name_en, highway, ref, oneway, surface, lanes, maxspeed, lanes_forward, lanes_backward, geojson_str, shapely_geom)
     cur.executemany(
-        "INSERT INTO streets (osm_id,osm_type,name,name_en,highway,ref,oneway,surface,lanes,maxspeed,geometry) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        [s[:11] for s in h.streets],
+        "INSERT INTO streets (osm_id,osm_type,name,name_en,highway,ref,oneway,surface,lanes,maxspeed,lanes_forward,lanes_backward,geometry) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [s[:13] for s in h.streets],
     )
     conn.commit()
 

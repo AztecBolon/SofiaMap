@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { clusterStreetSegments } = require("../lib/streetCluster");
+const { withDesignation } = require("../lib/streetDesignation");
 
 const router = express.Router();
 
@@ -39,7 +40,7 @@ router.get("/object/:type/:id", (req, res) => {
     if (!b) return res.status(404).json({ error: "not_found" });
     return res.json({
       type: "address", id: b.id, name: b.name || null,
-      addr_street: b.addr_street, housenumber: b.housenumber, city: b.city,
+      addr_street: withDesignation(b.addr_street), housenumber: b.housenumber, city: b.city,
       building: b.building, levels: b.levels, height: b.height,
       lat: b.lat, lon: b.lon, geometry: JSON.parse(b.geometry),
     });
@@ -64,7 +65,7 @@ router.get("/object/:type/:id", (req, res) => {
       parsed.filter((s) => s.osm_id === first.osm_id);
 
     return res.json({
-      type: "street", id: first.osm_id, name: first.name, highway: first.highway,
+      type: "street", id: first.osm_id, name: withDesignation(first.name), highway: first.highway,
       geometry: { type: "GeometryCollection", geometries: myCluster.map((s) => s.geometry) },
     });
   }
@@ -86,7 +87,7 @@ router.get("/object/:type/:id", (req, res) => {
     if (!c) return res.status(404).json({ error: "not_found" });
     return res.json({
       type: "company", id: c.id, name: c.name, rubric: c.rubric,
-      addr_street: c.addr_street, housenumber: c.housenumber,
+      addr_street: withDesignation(c.addr_street), housenumber: c.housenumber,
       phone: c.phone, website: c.website, email: c.email,
       opening_hours: c.opening_hours, wheelchair: c.wheelchair,
       lat: c.lat, lon: c.lon,

@@ -1,0 +1,79 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<title>metro-badge test</title>
+<style>
+  html,body{margin:0;padding:0;background:#e6ded0;font-family:sans-serif;}
+  #map{width:400px;height:400px;border:2px solid #333;}
+  #status{padding:10px;font-size:14px;white-space:pre-wrap;}
+</style>
+</head>
+<body>
+<div id="status">Загрузка…</div>
+<div id="map"></div>
+<script src="js/maplibre-gl.js"></script>
+<script src="js/stop-icons.js"></script>
+<script>
+// Изолированный тест: та же самая логика registerStopIcons() и тот же
+// paint, что в overlay-stations, но без базовой карты/данных — только
+// чтобы проверить, действительно ли ваш браузер рисует букву М внутри
+// значка metro-badge. Если здесь буква видна — дело не в этом коде и не
+// в файлах, а в чём-то другом на основной странице карты. Если и здесь
+// буквы нет — проблема в браузере/видеокарте на этой машине, а не в
+// файлах SofiaMap.
+const statusEl = document.getElementById("status");
+function setStatus(s) { statusEl.textContent = s; }
+
+try {
+  setStatus("stop-icons.js загружен: " + (typeof STOP_ICON_SPRITES !== "undefined") +
+    "\nmetro-badge sdf flag: " + (typeof STOP_ICON_SPRITES !== "undefined" ? STOP_ICON_SPRITES["metro-badge"].sdf : "n/a"));
+
+  const map = new maplibregl.Map({
+    container: "map",
+    style: {
+      version: 8,
+      sources: {
+        pt: {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [
+            { type: "Feature", geometry: { type: "Point", coordinates: [0, 0] }, properties: { stop_type: "subway" } },
+          ]},
+        },
+      },
+      layers: [{ id: "bg", type: "background", paint: { "background-color": "#e6ded0" } }],
+    },
+    center: [0, 0],
+    zoom: 14,
+  });
+
+  map.on("load", () => {
+    for (const [name, sprite] of Object.entries(STOP_ICON_SPRITES)) {
+      if (map.hasImage(name)) continue;
+      const raw = atob(sprite.base64);
+      const data = new Uint8ClampedArray(raw.length);
+      for (let i = 0; i < raw.length; i++) data[i] = raw.charCodeAt(i);
+      map.addImage(name, { width: sprite.width, height: sprite.height, data }, { sdf: sprite.sdf !== false });
+    }
+
+    map.addLayer({
+      id: "overlay-stations", type: "symbol", source: "pt",
+      layout: {
+        "icon-image": ["match", ["get", "stop_type"], "subway", "metro-badge", "rail-ladder"],
+        "icon-size": 4,
+        "icon-allow-overlap": true, "icon-ignore-placement": true,
+      },
+      paint: {
+        "icon-color": "#5c7291",
+        "icon-halo-color": "#ffffff", "icon-halo-width": 1.6,
+      },
+    });
+
+    map.once("idle", () => {
+      setStatus(statusEl.textContent + "\n\nГотово. Видна ли белая буква М внутри синего кружка ниже?");
+    });
+  });
+  map.on("error", (e) => setStatus("ОШИБКА MapLibre: " + (e && e.error)));
+} catch (e) {
+  setStatus("ОШИБКА JS: " + (e && e.stack || e));
+}
+</script>
+</body></html>

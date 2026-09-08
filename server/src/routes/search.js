@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { buildingKindLabel } = require("../lib/buildingKind");
+const { withDesignation } = require("../lib/streetDesignation");
 const { clusterStreetSegments, representativePoint, dedupeLabels } = require("../lib/streetCluster");
 
 const router = express.Router();
@@ -255,11 +256,11 @@ function toResult(type, row) {
       // when there's a number to go with the street; otherwise say what
       // kind of building this is (see buildingKind.js).
       const fallbackName = row.housenumber
-        ? `${row.addr_street} ${row.housenumber}`.trim()
+        ? `${withDesignation(row.addr_street)} ${row.housenumber}`.trim()
         : buildingKindLabel(row.building);
       return {
         id: row.id, type: "address", name: row.name || fallbackName,
-        subtitle: [row.addr_street, row.housenumber].filter(Boolean).join(" "),
+        subtitle: [withDesignation(row.addr_street), row.housenumber].filter(Boolean).join(" "),
         lat: row.lat, lng: row.lon, map_key: `address:${row.id}`,
       };
     }
@@ -284,7 +285,7 @@ function toResult(type, row) {
     case "company":
       return {
         id: row.id, type: "company", name: row.name, rubric: row.rubric,
-        subtitle: [row.rubric, [row.addr_street, row.housenumber].filter(Boolean).join(" ")].filter(Boolean).join(" · "),
+        subtitle: [row.rubric, [withDesignation(row.addr_street), row.housenumber].filter(Boolean).join(" ")].filter(Boolean).join(" · "),
         lat: row.lat, lng: row.lon, map_key: `company:${row.id}`,
       };
     default:
@@ -350,7 +351,7 @@ router.get("/search", (req, res) => {
         const subtitles = dedupeLabels(rawSubtitles);
         entries.forEach((e, i) => {
           items.push({
-            id: e.rep.id, type: "street", name: e.rep.name, subtitle: subtitles[i],
+            id: e.rep.id, type: "street", name: withDesignation(e.rep.name), subtitle: subtitles[i],
             lat: e.point ? e.point[1] : null, lng: e.point ? e.point[0] : null,
             map_key: `street:${e.rep.id}`,
             _tier: matchTier(e.rep.name, needle),
