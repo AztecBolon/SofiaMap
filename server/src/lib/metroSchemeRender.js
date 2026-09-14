@@ -123,12 +123,20 @@ function searchFormMarkup(stations) {
 
 const STYLE = `
 <style>
-  :root { --metro-circle:#fff; --metro-text:#111; --metro-dim-op:0.16; --metro-panel-bg:color-mix(in srgb, currentColor 5%, transparent); --metro-border:color-mix(in srgb, currentColor 22%, transparent); }
-  @media (prefers-color-scheme: dark) { :root { --metro-circle:#1c1c1c; --metro-text:#eee; } }
+  /* 2026-09-09 (decision E20 — "только визуальный стиль"): the handful of
+     rules below that reference --metro-accent are the ONLY change in this
+     block — everything else (structure, SVG, the JS above/below) is
+     untouched, and the official M1–M4 line colors (lineMeta) are never
+     touched here either. --metro-accent mirrors the site's own #3B3FA6/
+     #9FA8FF accent (htmlPage.js) so the metro page's non-line UI (form
+     focus, buttons, hover) matches the rest of the site instead of a
+     neutral grey. */
+  :root { --metro-circle:#fff; --metro-text:#111; --metro-dim-op:0.16; --metro-panel-bg:color-mix(in srgb, currentColor 5%, transparent); --metro-border:color-mix(in srgb, currentColor 22%, transparent); --metro-accent:#3B3FA6; }
+  @media (prefers-color-scheme: dark) { :root { --metro-circle:#1c1c1c; --metro-text:#eee; --metro-accent:#9FA8FF; } }
   .metro-toolbar { display:flex; flex-wrap:wrap; gap:16px; align-items:flex-start; margin:0.6em 0 1em; }
   .metro-legend { display:flex; gap:8px; flex-wrap:wrap; }
   .legend-item { display:flex; align-items:center; gap:6px; border:1px solid var(--metro-border); background:var(--metro-panel-bg); border-radius:16px; padding:4px 10px 4px 6px; font:inherit; font-size:0.85em; font-weight:600; cursor:pointer; color:inherit; transition:background 0.15s,transform 0.15s; }
-  .legend-item:hover { transform:translateY(-1px); }
+  .legend-item:hover { transform:translateY(-1px); border-color:var(--metro-accent); }
   .legend-item.active { background:var(--line-color); color:#fff; border-color:var(--line-color); }
   .legend-item.route-active { animation: legend-pulse 1.4s ease-in-out infinite; }
   .legend-swatch { width:14px; height:14px; border-radius:50%; background:var(--line-color); display:inline-block; }
@@ -136,7 +144,9 @@ const STYLE = `
   .metro-route-form { display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; }
   .metro-route-field { display:flex; flex-direction:column; gap:2px; font-size:0.85em; }
   .metro-route-field input { padding:6px 8px; border-radius:6px; border:1px solid var(--metro-border); background:var(--metro-panel-bg); color:inherit; font:inherit; min-width:200px; }
+  .metro-route-field input:focus { outline:none; border-color:var(--metro-accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--metro-accent) 20%, transparent); }
   .metro-clear-btn { padding:6px 12px; border-radius:6px; border:1px solid var(--metro-border); background:transparent; color:inherit; font:inherit; cursor:pointer; }
+  .metro-clear-btn:hover { border-color:var(--metro-accent); color:var(--metro-accent); }
   .metro-scheme-wrap { position:relative; overflow:auto; border:1px solid var(--metro-border); border-radius:10px; margin:0 0 1.2em; background:var(--metro-panel-bg); }
   #metro-svg { display:block; width:1500px; max-width:none; height:auto; }
   @media (min-width: 1180px) { #metro-svg { width:100%; } }
@@ -165,6 +175,7 @@ const STYLE = `
   .metro-popup .lines-row span { width:10px; height:10px; border-radius:50%; display:inline-block; }
   .metro-popup .popup-actions { display:flex; gap:6px; margin-top:6px; }
   .metro-popup button { font:inherit; font-size:0.85em; padding:3px 8px; border-radius:5px; border:1px solid var(--metro-border); background:transparent; color:inherit; cursor:pointer; }
+  .metro-popup button:hover { border-color:var(--metro-accent); color:var(--metro-accent); }
   .metro-popup a { font-size:0.85em; }
   .metro-popup .popup-close { position:absolute; top:4px; right:6px; border:none; background:none; cursor:pointer; font-size:1em; color:inherit; opacity:0.6; }
   .metro-result { border:1px solid var(--metro-border); border-radius:10px; padding:14px 16px; margin:0 0 1.4em; background:var(--metro-panel-bg); }
@@ -176,7 +187,7 @@ const STYLE = `
   .metro-result .hub-badge { font-size:0.78em; opacity:0.7; }
   .metro-variant-switch { margin:8px 0; }
   .metro-variant-switch button { font:inherit; font-size:0.85em; padding:3px 10px; border-radius:14px; border:1px solid var(--metro-border); background:transparent; color:inherit; cursor:pointer; margin-right:6px; }
-  .metro-variant-switch button.active { background:currentColor; color:Canvas; }
+  .metro-variant-switch button.active { background:var(--metro-accent); border-color:var(--metro-accent); color:#fff; }
   .metro-note { font-size:0.85em; opacity:0.7; margin:0.6em 0 1.4em; }
   [hidden] { display:none !important; }
 </style>`;

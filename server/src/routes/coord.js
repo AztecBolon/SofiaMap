@@ -9,6 +9,7 @@ const {
   representativePoint,
   dedupeLabels,
 } = require("../lib/streetCluster");
+const { priorityRank } = require("../lib/housenumberProvenance");
 
 const router = express.Router();
 
@@ -165,7 +166,7 @@ router.get("/street-at", (req, res) => {
 
 const streetById = db.prepare(`SELECT osm_id, name, geometry FROM streets WHERE osm_id = @id`);
 const buildingsByStreetName = db.prepare(`
-  SELECT id, name, addr_street, housenumber, lat, lon
+  SELECT id, name, addr_street, housenumber, housenumber_src, lat, lon
   FROM buildings
   WHERE lower_u(addr_street) = lower_u(@name)
     AND (name != '' OR housenumber != '')
@@ -182,6 +183,14 @@ const HOUSE_STREET_MAX_M = 400;
 function housenumberSortKey(hn) {
   const m = String(hn || "").match(/\d+/);
   return m ? parseInt(m[0], 10) : Number.MAX_SAFE_INTEGER;
+}
+// Russian/Bulgarian-in-Russian-UI plural of "запись" (fem., -ь) for the
+// duplicate-address subtitle below.
+function recordsWord(n) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "запись";
+  if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) return "записи";
+  return "записей";
 }
 
 // GET /api/street/:id/houses -> houses actually on THIS specific street
@@ -218,18 +227,48 @@ router.get("/street/:id/houses", (req, res) => {
       return { ...b, _d: best };
     })
     .filter((b) => b._d <= HOUSE_STREET_MAX_M)
-    .sort((a, b) => housenumberSortKey(a.housenumber) - housenumberSortKey(b.housenumber) || String(a.housenumber).localeCompare(String(b.housenumber), "bg"));
+    .sort(
+      (a, b) =>
+        housenumberSortKey(a.housenumber) - housenumberSortKey(b.housenumber) ||
+        String(a.housenumber).localeCompare(String(b.housenumber), "bg") ||
+        // Same civic number, several building rows — see
+        // lib/housenumberProvenance.js for why (different upstream imports
+        // digitized the same real building more than once) and
+        // streetsDirectory.js's getHousesForEntry, which this mirrors, for
+        // the full writeup. Order the more directly-sourced row first so
+        // it's the one that survives the collapse below.
+        priorityRank(a.housenumber_src) - priorityRank(b.housenumber_src) ||
+        a.id - b.id
+    );
+
+  // 2026-09-09 fix (reported live: map search's "Жамбилица" house list
+  // showed "№ 1"/"№ 2"/etc. two-three times each) — collapse building rows
+  // that share a real civic number down to one entry, same rule
+  // streetsDirectory.js uses for the static street pages. A collapsed
+  // entry's subtitle says how many other source records exist for it so
+  // the count in `meta.total` (still the raw row count) isn't mysteriously
+  // larger than the list — nothing is deleted, every row is still a real
+  // point on the map.
+  const collapsed = [];
+  let i = 0;
+  while (i < matched.length) {
+    const key = (matched[i].housenumber || "").trim();
+    let j = i + 1;
+    if (key) while (j < matched.length && (matched[j].housenumber || "").trim() === key) j++;
+    collapsed.push({ building: matched[i], extraCount: j - i - 1 });
+    i = j;
+  }
 
   const LIMIT = 300;
-  const items = matched.slice(0, LIMIT).map((b) => ({
+  const items = collapsed.slice(0, LIMIT).map(({ building: b, extraCount }) => ({
     id: b.id, type: "address",
     name: b.name || [withDesignation(first.name), b.housenumber].filter(Boolean).join(" "),
-    subtitle: b.housenumber ? `№ ${b.housenumber}` : "",
+    subtitle: b.housenumber ? `№ ${b.housenumber}${extraCount ? ` · ещё ${extraCount} ${recordsWord(extraCount)} того же адреса в исходных данных` : ""}` : "",
     lat: b.lat, lng: b.lon, map_key: `address:${b.id}`,
   }));
 
   res.json({
-    meta: { name: withDesignation(first.name), total: matched.length, returned: items.length, partial: matched.length > items.length },
+    meta: { name: withDesignation(first.name), total: collapsed.length, returned: items.length, partial: collapsed.length > items.length },
     items,
   });
 });

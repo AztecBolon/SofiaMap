@@ -6,7 +6,7 @@
 // dynamically from whatever names are actually in the data rather than a
 // fixed dictionary, since Sofia's street/stop names don't match a
 // pre-built Russian alphabetical breakdown.
-const { transliterate, createSlugAssigner } = require("./slugify");
+const { transliterate, slugify, createSlugAssigner } = require("./slugify");
 
 const CYRILLIC_RE = /[А-яЁё]/; // А-я + Ё/ё
 
@@ -72,7 +72,16 @@ function buildSubgroups(entries, { targetSize = 25 } = {}) {
     const to = g.prefixes[g.prefixes.length - 1];
     const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
     const label = from === to ? cap(from) : `${cap(from)}–${cap(to)}`;
-    const slug = `${transliterate(from.toLowerCase())}-${transliterate(to.toLowerCase())}`;
+    // 2026-09-09 fix (reported live: /streets/g/g.-ge/ → "Cannot GET"): this
+    // used to run `from`/`to` through the raw transliterate() instead of the
+    // full slugify() — transliterate() deliberately passes punctuation
+    // through unchanged (it's also used where callers want to keep it), so
+    // a 2-char prefix built from an abbreviated name like "Г. ..." carried
+    // its literal period straight into the URL ("g.-ge"), which never
+    // matched the route this same slug is looked up against. slugify()
+    // strips/collapses exactly that kind of punctuation, matching every
+    // other slug in this codebase.
+    const slug = `${slugify(from)}-${slugify(to)}`;
     return { label, slug, entries: g.entries };
   });
 }

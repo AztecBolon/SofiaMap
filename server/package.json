@@ -1,7 +1,7 @@
 {
   "name": "sofiamap-server",
   "version": "1.0.0",
-  "description": "Local static+API server for the Sofia map pilot (MapLibre + PMTiles + search over sofia.db)",
+  "description": "Local static+API server for the Sofia map pilot (MapLibre + PMTiles + search over sofia.db, Meilisearch)",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
@@ -10,6 +10,7 @@
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^11.3.0",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "meilisearch": "^0.44.0"
   }
 }

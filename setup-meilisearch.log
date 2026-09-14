@@ -1,0 +1,32 @@
+============================================ 
+  SofiaMap: one-time Meilisearch setup 
+  14.09.2026 18:40:30,56 
+============================================ 
+Found existing file at C:\SofiaMap\meilisearch\meilisearch.exe - checking it... 
+size: 346635776 bytes
+signature: MZ
+Existing file looks like a valid .exe - keeping it. 
+Skipping download - valid file already present. 
+ 
+============================================ 
+  Installing/updating npm dependencies... 
+============================================ 
+
+up to date, audited 106 packages in 3s
+
+23 packages are looking for funding
+  run `npm fund` for details
+
+3 moderate severity vulnerabilities
+
+To address all issues, run:
+  npm audit fix
+
+Run `npm audit` for details.
+ 
+============================================ 
+  SETUP COMPLETE 
+============================================ 
+Meilisearch binary: C:\SofiaMap\meilisearch\meilisearch.exe 
+npm dependencies installed in: C:\SofiaMap\server 
+Next step: run restart-server.bat 

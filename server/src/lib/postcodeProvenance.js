@@ -158,10 +158,18 @@ function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// 2026-09-09 fix (reported live on a house page): this used to link
+// straight out to the external source's own site when `s.url` was set.
+// The site already has one dedicated page for that — /o-dannyh/, linked
+// from every page's footer — and per the user's own rule content pages
+// must not link out to other sites directly, nor duplicate that footer
+// link inline. So this is plain text everywhere now, whether or not the
+// source has a URL; the full, real link still lives on /o-dannyh/ itself
+// (SOURCES table, pages.js) — that page IS the "специальная страница для
+// ссылок на источники" and is unaffected by this change.
 function sourceLink(sourceId) {
   const s = SOURCES[sourceId];
   if (!s) return "";
-  if (s.url) return `<a href="${esc(s.url)}" rel="nofollow">${esc(s.label)}</a> (${esc(s.org)})`;
   return `${esc(s.label)} (${esc(s.org)})`;
 }
 

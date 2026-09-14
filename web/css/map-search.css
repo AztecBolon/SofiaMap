@@ -1,5 +1,12 @@
+/* 2026-09-09: unified visual style (see claude/design-decisions.md) — the
+   map used to carry its own separate red accent (#dc5040/#b13b30/#9f2f24);
+   every one of those is now the same #3B3FA6 accent the rest of the site
+   uses (see server/src/lib/htmlPage.js's STYLE), and body copy switches
+   from the system font stack to Golos Text (loaded via index.html's
+   Google Fonts <link>) to match. Panel layout/structure is unchanged —
+   decision D16 was "сохранить панели, обновить стиль". */
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; font-family: -apple-system, Segoe UI, Arial, sans-serif; color: #24292f; }
+html, body { margin: 0; height: 100%; font-family: 'Golos Text', -apple-system, Segoe UI, Arial, sans-serif; color: #171923; }
 #map { position: absolute; inset: 0; }
 
 .map-search-workspace { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; }
@@ -13,64 +20,111 @@ html, body { margin: 0; height: 100%; font-family: -apple-system, Segoe UI, Aria
 .map-search-results__head h1 { margin: 0 0 4px; font-size: 19px; }
 .map-search-results__meta { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .map-search-results__meta span { color: #6a737d; font-size: 12.5px; }
-.map-search-share { padding: 6px 10px; border: 1px solid #dc5040; border-radius: 6px; background: #fff; color: #b13b30; font-size: 11px; font-weight: 600; cursor: pointer; }
-.map-search-share:hover { background: #fff4f1; }
+.map-search-share { padding: 6px 10px; border: 1px solid #3B3FA6; border-radius: 6px; background: #fff; color: #2E3389; font-size: 11px; font-weight: 600; cursor: pointer; }
+.map-search-share:hover { background: #EFEFFB; }
 .map-search-share-status { color: #2f7a44 !important; }
 .map-search-results__body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 
 .map-search-empty, .map-search-loading, .map-search-error { padding: 24px 18px; color: #6a737d; line-height: 1.5; }
-.map-search-error { color: #9f2f24; }
+.map-search-error { color: #2E3389; }
 
 .map-search-result { display: flex; gap: 10px; width: 100%; padding: 12px 18px; border: 0; border-bottom: 1px solid #f0f0f0; background: #fff; text-align: left; cursor: pointer; }
-.map-search-result:hover, .map-search-result.is-active { background: #fbf4f2; box-shadow: inset 4px 0 #dc5040; }
-.map-search-result__icon { flex: 0 0 22px; color: #b13b30; }
+.map-search-result:hover, .map-search-result.is-active { background: #EFEFFB; box-shadow: inset 4px 0 #3B3FA6; }
+.map-search-result__icon { flex: 0 0 22px; color: #2E3389; }
 .map-search-result__icon svg { width: 20px; height: 20px; fill: currentColor; }
 .map-search-result__text strong { display: block; font-size: 14px; margin-bottom: 2px; }
 .map-search-result__text span { color: #777; font-size: 12px; }
-.map-search-result--rubric { background: #fff8f6; border-left: 4px solid #dc5040; }
+.map-search-result--rubric { background: #EFEFFB; border-left: 4px solid #3B3FA6; }
 
 .map-search-section { padding: 10px 18px 6px; background: #f6f6f6; color: #555; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 
+/* "Открыть страницу" (2026-09-09, claude/search-results-plan.md) — a real
+   link to the object's own page, alongside (not instead of) the row's own
+   click-to-select-on-map behaviour, so it needs its own stopped-propagation
+   handling in map-search.js rather than just more CSS. */
+.map-search-result__open { display: inline-block; margin-top: 4px; color: #2E3389; font-size: 11.5px; font-weight: 600; text-decoration: none; }
+.map-search-result__open:hover { text-decoration: underline; }
+
+/* "Связанные объекты" — a street result's first few real houses, nested
+   right under its row (search.js's `related`). Indented under the icon
+   column so it visually reads as belonging to the row above it. */
+.map-search-related { padding: 8px 18px 10px 46px; background: #fafafa; border-bottom: 1px solid #f0f0f0; }
+.map-search-related__title { margin-bottom: 6px; color: #888; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.map-search-related__row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 4px 0; font-size: 12.5px; }
+.map-search-related__row a { color: #2E3389; font-size: 11.5px; font-weight: 600; white-space: nowrap; text-decoration: none; }
+.map-search-related__row a:hover { text-decoration: underline; }
+.map-search-related__more { display: inline-block; margin-top: 4px; padding: 0; border: 0; background: none; color: #2E3389; font-size: 12px; font-weight: 600; cursor: pointer; }
+.map-search-related__more:hover { text-decoration: underline; }
+
+/* 2026-09-14 (claude/next-steps-rubric-grouping.md, second wave) — the same
+   block reused for a rubric's "Организации" preview adds a second action
+   ("Показать все на карте") next to "Показать все N", so both buttons sit
+   in their own row instead of the plain single margin-top the street
+   version used. */
+.map-search-related__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 4px; }
+.map-search-related__actions .map-search-related__more { margin-top: 0; }
+.map-search-related__onmap { display: inline-block; padding: 0; border: 0; background: none; color: #2E3389; font-size: 12px; font-weight: 600; cursor: pointer; }
+.map-search-related__onmap:hover { text-decoration: underline; }
+
+/* "Ещё N улиц с таким названием" (2026-09-14, fourth wave, decision B1 —
+   search-results-plan.md §8.2/§9). Same indent as .map-search-related so it
+   reads as belonging to the row above it; collapsed list is hidden until
+   the note's own toggle is clicked. */
+.map-search-namesakes { padding: 6px 18px 10px 46px; background: #fafafa; border-bottom: 1px solid #f0f0f0; font-size: 12px; color: #666; line-height: 1.5; }
+.map-search-namesakes__note { margin: 0; }
+.map-search-namesakes__toggle { display: inline; margin-left: 4px; padding: 0; border: 0; background: none; color: #2E3389; font-size: 12px; font-weight: 600; cursor: pointer; }
+.map-search-namesakes__toggle:hover { text-decoration: underline; }
+.map-search-namesakes__list { margin-top: 8px; }
+.map-search-namesake { padding: 8px 0; border-top: 1px solid #eee; }
+.map-search-namesake:first-child { border-top: 0; }
+.map-search-namesake__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.map-search-namesake__head strong { font-size: 13px; }
+.map-search-namesake__head span { color: #777; font-size: 11.5px; }
+.map-search-namesake__open { color: #2E3389; font-size: 11px; font-weight: 600; text-decoration: none; }
+.map-search-namesake__open:hover { text-decoration: underline; }
+.map-search-namesake__houses { margin-top: 4px; padding-left: 4px; }
+.map-search-namesake__more-note { display: block; color: #999; font-size: 11px; margin-top: 2px; }
+
 .map-selected-card { padding: 16px 18px 22px; }
-.map-selected-back { margin-bottom: 16px; padding: 0; border: 0; background: none; color: #b13b30; font-size: 13px; cursor: pointer; }
+.map-selected-back { margin-bottom: 16px; padding: 0; border: 0; background: none; color: #2E3389; font-size: 13px; cursor: pointer; }
 .map-selected-back:hover { text-decoration: underline; }
 .map-selected-type { display: block; margin-bottom: 5px; color: #777; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .map-selected-card h2 { margin: 0 0 8px; font-size: 18px; }
 .map-selected-card p { margin: 0 0 6px; color: #555; font-size: 13px; line-height: 1.5; }
-.map-selected-card a.map-selected-link { color: #b13b30; font-size: 13px; }
+.map-selected-card a.map-selected-link { color: #2E3389; font-size: 13px; }
 .map-route-stops { margin-top: 14px; }
 .map-route-stop { display: flex; gap: 9px; padding: 7px 0; border-top: 1px solid #eee; font-size: 12.5px; }
 .map-route-stop span { flex: 0 0 22px; color: #888; text-align: right; }
-.map-route-stop.is-edge { font-weight: 700; color: #9f2f24; }
+.map-route-stop.is-edge { font-weight: 700; color: #2E3389; }
 .map-selected-directions { margin: 10px 0; display: flex; gap: 6px; flex-wrap: wrap; }
 .map-selected-directions button { padding: 6px 10px; border: 1px solid #ddd; border-radius: 14px; background: #fff; font-size: 12px; cursor: pointer; }
-.map-selected-directions button.is-active { border-color: #dc5040; background: #fff1ed; color: #9f2f24; }
+.map-selected-directions button.is-active { border-color: #3B3FA6; background: #EFEFFB; color: #2E3389; }
 
 .map-rubric-head { padding: 16px 18px 12px; border-bottom: 1px solid #eee; }
-.map-rubric-head strong { display: block; color: #9f2f24; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
+.map-rubric-head strong { display: block; color: #2E3389; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
 .map-rubric-head h2 { margin: 4px 0; font-size: 17px; }
 .map-rubric-head p { margin: 0; color: #666; font-size: 12.5px; }
 .map-rubric-company { display: block; width: 100%; padding: 11px 18px; border: 0; border-bottom: 1px solid #f0f0f0; background: #fff; text-align: left; cursor: pointer; }
-.map-rubric-company:hover, .map-rubric-company.is-active { background: #fbf4f2; box-shadow: inset 4px 0 #dc5040; }
+.map-rubric-company:hover, .map-rubric-company.is-active { background: #EFEFFB; box-shadow: inset 4px 0 #3B3FA6; }
 .map-rubric-company strong { display: block; font-size: 13.5px; }
 .map-rubric-company span { color: #777; font-size: 12px; }
 
 .map-search-field { display: flex; height: 42px; border: 1px solid #ccc; border-radius: 8px; background: #fff; }
-.map-search-field:focus-within { border-color: #dc5040; box-shadow: 0 0 0 2px rgba(220,80,64,.15); }
+.map-search-field:focus-within { border-color: #3B3FA6; box-shadow: 0 0 0 2px rgba(59,63,166,.18); }
 .map-search-field input { flex: 1; min-width: 0; border: 0; outline: 0; padding: 0 12px; font-size: 14.5px; border-radius: 8px; }
-.map-search-submit { flex: 0 0 auto; margin: 4px; padding: 0 14px; border: 0; border-radius: 6px; background: #dc5040; color: #fff; font-weight: 600; cursor: pointer; }
+.map-search-submit { flex: 0 0 auto; margin: 4px; padding: 0 14px; border: 0; border-radius: 6px; background: #3B3FA6; color: #fff; font-weight: 600; cursor: pointer; }
 .map-search-submit:disabled { background: #d8d8d8; color: #888; cursor: not-allowed; }
 
 .map-search-filters { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
 .map-search-filters button { padding: 7px 11px; border: 1px solid #ddd; border-radius: 16px; background: #fff; font-size: 12px; cursor: pointer; }
-.map-search-filters button.is-active { border-color: #dc5040; background: #dc5040; color: #fff; }
+.map-search-filters button.is-active { border-color: #3B3FA6; background: #3B3FA6; color: #fff; }
 .map-search-more { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; padding: 8px; border: 1px solid #eee; border-radius: 8px; background: #fafafa; }
 .map-search-more button { padding: 7px 8px; border: 1px solid transparent; border-radius: 6px; background: #fff; font-size: 11px; text-align: left; cursor: pointer; }
-.map-search-more button.is-active { border-color: #dc5040; background: #fff1ed; color: #9f2f24; font-weight: 600; }
+.map-search-more button.is-active { border-color: #3B3FA6; background: #EFEFFB; color: #2E3389; font-weight: 600; }
 .map-search-more[hidden] { display: none; }
 .map-search-bounds { display: flex; align-items: center; gap: 7px; margin-top: 12px; font-size: 12px; color: #555; }
-.map-search-route-open { display: block; width: 100%; margin-top: 12px; padding: 9px 12px; border: 1px solid #dc5040; border-radius: 7px; background: #fff; color: #b13b30; font-size: 12.5px; font-weight: 600; cursor: pointer; }
-.map-search-route-open:hover { background: #fff4f1; }
+.map-search-route-open { display: block; width: 100%; margin-top: 12px; padding: 9px 12px; border: 1px solid #3B3FA6; border-radius: 7px; background: #fff; color: #2E3389; font-size: 12.5px; font-weight: 600; cursor: pointer; }
+.map-search-route-open:hover { background: #EFEFFB; }
 
 .map-route-stub { padding: 16px 18px; }
 .map-route-stub h2 { margin: 0 0 10px; font-size: 16px; }

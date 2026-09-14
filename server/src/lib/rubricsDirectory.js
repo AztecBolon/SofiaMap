@@ -148,7 +148,14 @@ function getNearbyForRubricByGeometry(rubric, segments, distanceToClusterFn, rad
 }
 
 module.exports = {
-  listRubrics, getRubricBySlug, getCompanyPage, findCompanyBySlug, getCompanyLink,
+  // 2026-09-14 (claude/next-steps-rubric-grouping.md, search-results-plan.md
+  // §6): `getCompaniesForRubric` was already the exact function search.js
+  // needs for a rubric result's "Организации" preview (same cache
+  // `/rubrics/:slug/` pages build from, real slugs included) — it just
+  // wasn't exported yet, since until now every external caller only ever
+  // needed a page of it (`getCompanyPage`) or one company by id
+  // (`getCompanyLink`).
+  listRubrics, getRubricBySlug, getCompaniesForRubric, getCompanyPage, findCompanyBySlug, getCompanyLink,
   getNearbyByRubric, getNearbyForRubric, getNearbyByRubricForGeometry, getNearbyForRubricByGeometry,
   DEFAULT_NEARBY_RADIUS_M, PAGE_SIZE,
 };

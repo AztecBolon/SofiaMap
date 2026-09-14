@@ -7,6 +7,18 @@ const objectRoutes = require("./routes/object");
 const coordRoutes = require("./routes/coord");
 const pagesRoutes = require("./routes/pages");
 
+// 2026-09-14 (Meilisearch migration, search-results-plan.md §12-§13): /api/search
+// now relies ENTIRELY on Meilisearch — there is no more SQL fallback inside
+// search.js. That means this process must not start ACCEPTING requests until
+// (a) the Meilisearch server (started separately, see start-meilisearch.bat)
+// is actually reachable, and (b) a fresh reindex of it off the current
+// sofia.db has completed — otherwise the very first requests after a restart
+// would hit empty/stale indexes. Both are awaited below, before app.listen.
+const meili = require("./lib/meiliClient");
+const { main: reindexMeilisearch } = require("./scripts/reindexMeilisearch");
+const streetsDirectory = require("./lib/streetsDirectory");
+const rubricsDirectory = require("./lib/rubricsDirectory");
+
 const PORT = process.env.PORT || 5173;
 const WEB_DIR = path.resolve(__dirname, "..", "..", "web");
 const DATA_DIR = path.resolve(__dirname, "..", "..", "data");
@@ -73,6 +85,73 @@ app.use("/data", express.static(DATA_DIR, { setHeaders: (res) => res.set("Cache-
 // the new "/map/" mount without any change to that file's markup.
 app.use("/map", express.static(WEB_DIR, { setHeaders: (res) => res.set("Cache-Control", "no-cache") }));
 
-app.listen(PORT, () => {
-  console.log(`Sofia map server running at http://localhost:${PORT}`);
+// Polls Meilisearch's /health endpoint until it responds or timeoutMs
+// elapses. meilisearch.exe is started as its own process a few seconds
+// before this one (see start-meilisearch.bat) but there's no guarantee it's
+// finished loading its own on-disk index data by the time this process's
+// first tick runs, especially on a cold boot right after the machine starts.
+async function waitForMeiliHealth(timeoutMs = 30000, intervalMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  let lastErr = null;
+  while (Date.now() < deadline) {
+    try {
+      await meili.health();
+      return;
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  }
+  throw new Error(
+    `Meilisearch did not become reachable within ${timeoutMs}ms (last error: ${lastErr && lastErr.message}). ` +
+      "Is meilisearch.exe running? (see start-meilisearch.bat)"
+  );
+}
+
+async function start() {
+  const t0 = Date.now();
+  console.log("[startup] waiting for Meilisearch to be reachable...");
+  await waitForMeiliHealth();
+  console.log(`[startup] Meilisearch reachable after ${Date.now() - t0}ms, reindexing...`);
+
+  const t1 = Date.now();
+  await reindexMeilisearch();
+  console.log(`[startup] reindex complete in ${Date.now() - t1}ms`);
+
+  // 2026-09-14 (§14, real-machine deployment finding): on the real Windows
+  // machine, the FIRST search against a just-reindexed Meilisearch index
+  // sometimes threw "Too many spurious wake ups while trying to open the
+  // index X" (Windows file-locking/AV-scan contention while Meilisearch
+  // lazily opens that index's memory-mapped files, right after reindex just
+  // wrote them) — never seen in the Linux sandbox. Forcing one throwaway
+  // search per index here, before app.listen, absorbs that one-time "first
+  // open" cost/flakiness at startup instead of a live user's search request
+  // hitting it. See routes/search.js's warmUpMeiliIndexes and
+  // meiliSearchSub's retry comment for the full story.
+  const t1b = Date.now();
+  await searchRoutes.warmUpMeiliIndexes();
+  console.log(`[startup] Meilisearch index warm-up: ${Date.now() - t1b}ms`);
+
+  // 2026-09-14 (§12.5 perf fix, verification): streetsDirectory.get() and
+  // rubricsDirectory.listRubrics() are lazy singletons — without forcing
+  // them here, whichever live request happens to be first (after this
+  // process starts) pays their one-time build cost (~0.4-1s for streets on
+  // this dataset) instead of it being absorbed into server startup, where a
+  // human isn't waiting on a specific response. Cheap and safe to force
+  // eagerly (both are pure in-memory builds off the already-open, read-only
+  // sofia.db — see either module's own top comment).
+  const t2 = Date.now();
+  streetsDirectory.get();
+  rubricsDirectory.listRubrics();
+  console.log(`[startup] directory warm-up: ${Date.now() - t2}ms`);
+
+  app.listen(PORT, () => {
+    console.log(`Sofia map server running at http://localhost:${PORT}`);
+    console.log(`[startup] total startup time: ${Date.now() - t0}ms`);
+  });
+}
+
+start().catch((err) => {
+  console.error("[startup] FATAL — server did not start:", err);
+  process.exit(1);
 });

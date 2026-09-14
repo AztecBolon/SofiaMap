@@ -5,7 +5,15 @@ echo ============================================
 echo   SofiaMap: restarting server...
 echo ============================================
 
-cd /d C:\SofiaMap\server
+rem 2026-09-14 (Meilisearch migration): /api/search now depends entirely on
+rem Meilisearch (no more SQL fallback — see server/src/routes/search.js's
+rem top comment), so it has to be up before the Node server is. Starting it
+rem here is fire-and-forget (its own window, its own startup time) — the
+rem Node server's src/index.js polls Meilisearch's health endpoint and runs
+rem a full reindex itself before it starts listening on 5173, so the wait
+rem for "actually ready" below still works correctly even if Meilisearch is
+rem still booting when this line returns.
+call "%~dp0start-meilisearch.bat"
 
 echo Stopping any server already using port 5173...
 set FOUND=0
@@ -20,11 +28,12 @@ if "!FOUND!"=="1" (
 )
 timeout /t 1 /nobreak >nul
 
-echo Starting server...
-start "SofiaMap server" cmd /k "node src\index.js"
+echo Starting server - this also waits for Meilisearch plus a full reindex,
+echo so "up" can take longer than before. Log: C:\SofiaMap\server.log
+start "SofiaMap server" cmd /k "C:\SofiaMap\server\_run-server.bat"
 
 echo Waiting for the server to come up...
-set MAX_WAIT=20
+set MAX_WAIT=90
 set WAITED=0
 
 :waitloop
@@ -43,8 +52,8 @@ goto :end
 :timeout_msg
 echo.
 echo Сервер не ответил за %MAX_WAIT% секунд.
-echo Посмотрите окно "SofiaMap server" - там должна быть причина ошибки.
-echo Это окно останется открытым.
+echo Посмотрите окна "SofiaMap server" и "SofiaMap meilisearch" - там должна быть причина ошибки.
+echo Эти окна останутся открытыми.
 pause
 goto :end
 

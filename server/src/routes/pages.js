@@ -24,8 +24,9 @@ const culturalHeritage = require("../lib/culturalHeritage");
 const schoolsDir = require("../lib/schoolsDirectory");
 const { withDesignation } = require("../lib/streetDesignation");
 const { getPostcodeNote, SOURCES } = require("../lib/postcodeProvenance");
+const { sourceLabel: houseSourceLabel } = require("../lib/housenumberProvenance");
 const postcodes = require("../lib/postcodesDirectory");
-const { page, itemList, letterNav, mapLink, esc } = require("../lib/htmlPage");
+const { page, itemList, letterNav, mapLink, esc, blockWrap, miniMapWidget, mapAssetsHead, mapAssetsScripts } = require("../lib/htmlPage");
 const metroScheme = require("../lib/metroScheme");
 const { renderMetroPage } = require("../lib/metroSchemeRender");
 
@@ -123,6 +124,11 @@ router.get("/metro/", (req, res) => {
     h1: "Схема метро Софии",
     breadcrumbs: [HOME, { label: "Схема метро" }],
     body: renderMetroPage(data),
+    // /metro/ is explicitly out of scope for the header/footer/ad-rail
+    // chrome (site-design-plan.md §4.1) despite sharing this page() shell
+    // with every "typical" page — frame:false keeps its output identical
+    // to what page() produced before the chrome existed.
+    frame: false,
   }));
 });
 
@@ -176,7 +182,12 @@ function surfaceStopCard(s) {
     .map(([type, routes]) => `
       <p class="stop-routes-label">${esc(routesDir.TYPE_LABELS[type] || type)}</p>
       <ul class="stop-routes">${routes
-        .map((r) => `<li><a href="${esc(r.href)}">${esc(r.ref)}${r.toMetro ? ` (до метро «${esc(r.toMetro.metroName)}» — ${r.toMetro.stops} ${stopsWord(r.toMetro.stops)})` : ""}</a></li>`)
+        .map(
+          (r) =>
+            `<li><a class="route-badge" href="${esc(r.href)}">${esc(r.ref)}</a>${
+              r.toMetro ? `<span class="route-note">до метро «${esc(r.toMetro.metroName)}» — ${r.toMetro.stops} ${stopsWord(r.toMetro.stops)}</span>` : ""
+            }</li>`
+        )
         .join("")}</ul>
     `)
     .join("");
@@ -332,6 +343,31 @@ router.get("/streets/:letterSlug([^./]+)/:subgroupSlug([^./]+)/", (req, res) => 
 // measured against the street's actual GEOMETRY, not a single point (a
 // long boulevard's own midpoint can sit hundreds of metres from either of
 // its ends).
+// 2026-09-09 fix (reported live: "ул. Жамбилица 1" listed three times in
+// "Дома") — see housenumberProvenance.js for why duplicate building rows
+// exist and streetsDirectory.js's getHousesForEntry for how one is picked
+// as the address's main entry (`house.variants`) with the rest flagged
+// (`house.variantOf`). These two render the honest explanation rather than
+// silently hiding the duplicates: a small note under the main entry linking
+// to the other version(s), and a note on each other version's own page
+// pointing back to the main one.
+function houseVariantsNote(house, streetSlug, tag = "div") {
+  if (!house.variants || !house.variants.length) return "";
+  // sourceLabel()/houseSourceLabel() already return a fully-formed
+  // "label (org)" string (and for some sources the label itself already
+  // carries its own guillemets, e.g. "«Официалните адреси...» (address_sofia)")
+  // — no extra «» wrapping here, same convention postcodeProvenance.js's
+  // sourceLink() uses.
+  const links = house.variants
+    .map((v) => `<a href="/streets/${esc(streetSlug)}/dom-${esc(v.slug)}.html">запись из ${esc(v.sourceLabel)}</a>`)
+    .join(", ");
+  return `<${tag} class="${tag === "p" ? "meta " : ""}house-variants-note">ℹ Этот адрес продублирован в исходных данных — контур здания встретился в нескольких источниках. Показана запись из источника ${esc(houseSourceLabel(house.housenumber_src))}; другие варианты: ${links}.</${tag}>`;
+}
+function houseVariantOfNote(house, streetSlug) {
+  if (!house.variantOf) return "";
+  return `<p class="meta house-variants-note">ℹ Это не единственная запись для этого адреса в наших данных — контур этого здания продублирован (эта запись из источника ${esc(houseSourceLabel(house.housenumber_src))}). Основная запись: <a href="/streets/${esc(streetSlug)}/dom-${esc(house.variantOf.slug)}.html">${esc(house.variantOf.displayName)}</a> (источник ${esc(house.variantOf.sourceLabel)}).</p>`;
+}
+
 const ORGS_DISPLAY_LIMIT = 80;
 router.get("/streets/:slug.html", (req, res) => {
   const idx = streets.get();
@@ -352,9 +388,19 @@ router.get("/streets/:slug.html", (req, res) => {
     ${mapLink(entry.name, "streets")}
   `;
 
+  // Only one entry per real civic number is shown here — duplicate building
+  // rows (see housenumberProvenance.js) stay individually reachable via the
+  // note under their address's main entry, they just don't clutter the list
+  // as separate-looking "houses" (2026-09-09 fix).
+  const visibleHouses = houses.filter((h) => !h.variantOf);
   const housesBlock = `
-    <h2 id="houses">Дома (${houses.length})</h2>
-    ${itemList(houses.map((h) => ({ href: `/streets/${entry.slug}/dom-${h.slug}.html`, label: h.displayName, count: null })))}
+    <h2 id="houses">Дома (${visibleHouses.length})</h2>
+    <ul class="item-list">${visibleHouses
+      .map((h) => {
+        const note = houseVariantsNote(h, entry.slug);
+        return `<li${note ? ' class="has-variants"' : ""}><a href="/streets/${esc(entry.slug)}/dom-${esc(h.slug)}.html">${esc(h.displayName)}</a>${note}</li>`;
+      })
+      .join("")}</ul>
   `;
 
   const orgsBlock = orgs.length ? `
@@ -377,7 +423,7 @@ router.get("/streets/:slug.html", (req, res) => {
   const seoFacts = [];
   if (district) seoFacts.push(`проходит в районе ${district.name}`);
   if (orgs.length) seoFacts.push(`${orgs.length} организаци${orgs.length === 1 ? "я" : "й"} на этой улице`);
-  seoFacts.push(`${houses.length} дом${houses.length === 1 ? "" : "ов"}`);
+  seoFacts.push(`${visibleHouses.length} дом${visibleHouses.length === 1 ? "" : "ов"}`);
   const seoParagraph = `<p>${esc(displayName)} — ${seoFacts.join(", ")}.</p>`;
 
   const body = `
@@ -507,13 +553,32 @@ router.get("/streets/:streetSlug/dom-:houseSlug.html", (req, res) => {
       `Если адрес выглядит не в том районе — возможно, это не ошибка, а просто тёзка (подробнее: <a href="/o-dannyh/#odnoimennye-ulitsy">почему так бывает</a>).</p>`
     : "";
 
-  const mainBlock = `
-    <h2 id="main">Основное</h2>
+  // 2026-09-09 fix — same duplicate-building-row situation as the street
+  // list (see housenumberProvenance.js): whichever of these two applies to
+  // THIS house, one is always empty.
+  const duplicateNoteHtml = house.variantOf
+    ? houseVariantOfNote(house, entry.slug)
+    : houseVariantsNote(house, entry.slug, "p");
+
+  const mainInner = `
     <p class="meta">${mainMeta}</p>
     ${postcodeNoteHtml}
     ${collisionHtml}
+    ${duplicateNoteHtml}
     ${mapLink(house.housenumber ? `${entry.name} ${house.housenumber}` : entry.name, "streets")}
   `;
+  const mainBlock = blockWrap("main", "Основное", "mapPin", mainInner);
+
+  // Live map widget (decision C13) — same address text as the "Открыть на
+  // карте" link above, via the shared mapHref()/`?q=` convention (see
+  // htmlPage.js's miniMapWidget()); needs the house's own point, not the
+  // street cluster's, so it lands on this exact building.
+  const mapWidgetHtml = miniMapWidget({
+    lat: house.lat,
+    lon: house.lon,
+    query: house.housenumber ? `${entry.name} ${house.housenumber}` : entry.name,
+    type: "streets",
+  });
 
   // ---- Как доехать (§12: metro box + surface stops, reference's own
   // two-part shape — see transportNearby.js#getKakProehat). Rendering
@@ -521,12 +586,12 @@ router.get("/streets/:streetSlug/dom-:houseSlug.html", (req, res) => {
   // verbatim by the organization page's "Транспорт рядом" block below.
   const { metro, surface } = kakProehat;
   const kpHtml = kakProehatHtml(kakProehat);
-  const transportBlock = kpHtml ? `<h2 id="transport">Как доехать</h2>${kpHtml}` : "";
+  const transportBlock = kpHtml ? blockWrap("transport", "Как доехать", "bus", kpHtml) : "";
 
   // ---- Культурное наследие (§13.2/§17) ----
   let heritageBlock = "";
   if (monument || protectionZone) {
-    let inner = `<h2 id="heritage">Культурное наследие</h2>`;
+    let inner = "";
     if (monument) {
       const facts = [monument.type, monument.category].filter(Boolean);
       const label = monument.exact
@@ -538,7 +603,7 @@ router.get("/streets/:streetSlug/dom-:houseSlug.html", (req, res) => {
     if (protectionZone) {
       inner += `<p>Дом находится в охранной зоне памятника «${esc(protectionZone.name)}»</p>`;
     }
-    heritageBlock = inner;
+    heritageBlock = blockWrap("heritage", "Культурное наследие", "landmark", inner);
   }
 
   // ---- Администрация и полиция (§13.6/§13.11/§13.12) — only when the
@@ -548,41 +613,35 @@ router.get("/streets/:streetSlug/dom-:houseSlug.html", (req, res) => {
   // `raion` itself.
   let adminBlock = "";
   if (raion && adminContact && policeContact) {
-    adminBlock = `
-      <h2 id="admin">Администрация и полиция</h2>
+    const inner = `
       <p class="meta">Официальный район: <strong>${esc(raion.name)}</strong></p>
       <p>Районна администрация «${esc(raion.name)}»: ${esc(adminContact.address)} (кмет: ${esc(adminContact.mayor)})</p>
       <p>${esc(policeContact.num)} РУ СДВР: ${esc(policeContact.address)}, тел. ${esc(policeContact.phone)}</p>
     `;
+    adminBlock = blockWrap("admin", "Администрация и полиция", "shield", inner);
   }
 
   // ---- Приписанная школа (§13.10/§18) ----
   let schoolBlock = "";
   if (schoolMatch) {
-    schoolBlock = `
-      <h2 id="school">Приписанная школа</h2>
-      ${schoolMatch.ambiguous
-        ? `<p class="meta">Для этого адреса в реестре указано несколько школ (вероятно, по разным подъездам):</p><ul>${schoolMatch.schools.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`
-        : `<p>${esc(schoolMatch.schools[0])}</p>`}
-    `;
+    const inner = schoolMatch.ambiguous
+      ? `<p class="meta">Для этого адреса в реестре указано несколько школ (вероятно, по разным подъездам):</p><ul>${schoolMatch.schools.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`
+      : `<p>${esc(schoolMatch.schools[0])}</p>`;
+    schoolBlock = blockWrap("school", "Приписанная школа", "school", inner);
   }
 
   // ---- Организации ----
   let orgsBlock = "";
   if (orgs.length) {
-    orgsBlock = `
-      <h2 id="orgs">Организации (${orgs.length})</h2>
-      ${itemList(orgs.map((o) => ({ href: o.href, label: o.exact ? o.name : `${o.name} (поблизости)`, count: o.rubric || null })))}
-    `;
+    const inner = itemList(orgs.map((o) => ({ href: o.href, label: o.exact ? o.name : `${o.name} (поблизости)`, count: o.rubric || null })));
+    orgsBlock = blockWrap("orgs", `Организации (${orgs.length})`, "briefcase", inner);
   }
 
   // ---- Инфраструктура рядом ----
   let infraBlock = "";
   if (infra.length) {
-    infraBlock = `
-      <h2 id="infra">Инфраструктура рядом</h2>
-      <ul class="type-filter">${infra.map((r) => `<li><a href="/rubrics/${r.slug}/?near=${house.lat},${house.lon}">${esc(r.name)} (${r.nearbyCount})</a></li>`).join("")}</ul>
-    `;
+    const inner = `<ul class="type-filter">${infra.map((r) => `<li><a href="/rubrics/${r.slug}/?near=${house.lat},${house.lon}">${esc(r.name)} (${r.nearbyCount})</a></li>`).join("")}</ul>`;
+    infraBlock = blockWrap("infra", "Инфраструктура рядом", "grid", inner);
   }
 
   // ---- якорное меню — только реально присутствующие блоки (§9) ----
@@ -609,11 +668,17 @@ router.get("/streets/:streetSlug/dom-:houseSlug.html", (req, res) => {
   if (metro.length) seoFacts.push(`ближайшее метро «${metro[0].name}» в ${metro[0].distanceM} м`);
   else if (surface.stops.length) seoFacts.push(`ближайшая остановка «${surface.stops[0].name}» в ${surface.stops[0].distanceM} м`);
   const seoParagraph = seoFacts.length ? `<p>${esc(house.displayName)} ${seoFacts.join(", ")}.</p>` : "";
+  const seoBlockHtml = seoParagraph || anchorNav
+    ? `<div class="seo-block">
+        ${house.housenumber && !seoParagraph ? `<p>№ ${house.housenumber}</p>` : ""}
+        ${seoParagraph}
+        ${anchors.length > 1 ? `<ul class="anchor-tabs">${anchors.map((a) => `<li><a href="${a.href}">${esc(a.label)}</a></li>`).join("")}</ul>` : ""}
+      </div>`
+    : "";
 
   const body = `
-    ${house.housenumber && !seoParagraph ? `<p class="meta">№ ${house.housenumber}</p>` : ""}
-    ${seoParagraph}
-    ${anchorNav}
+    ${seoBlockHtml}
+    ${mapWidgetHtml}
     ${mainBlock}
     ${heritageBlock}
     ${transportBlock}
@@ -627,6 +692,8 @@ router.get("/streets/:streetSlug/dom-:houseSlug.html", (req, res) => {
     h1: house.displayName,
     breadcrumbs: [HOME, { label: "Улицы", href: "/streets/" }, { label: entry.displayName, href: `/streets/${entry.slug}.html` }, { label: house.displayName }],
     body,
+    headExtra: mapWidgetHtml ? mapAssetsHead() : "",
+    scripts: mapWidgetHtml ? mapAssetsScripts() : "",
   }));
 });
 
@@ -1211,6 +1278,82 @@ router.get("/o-dannyh/", (req, res) => {
     breadcrumbs: [HOME, { label: "О данных" }],
     body,
     noindex: true,
+  }));
+});
+
+// ------------------------------------------------------------ /disclaimer/
+// Дисклеймер и /soglashenie/ (Пользовательское соглашение) — набросок
+// текста, который пользователь попросил подготовить самому ("2. Сделай
+// набросок (после дизайна)"). Это ЧЕРНОВИК: явно помечен как таковой на
+// самой странице и НЕ является юридической консультацией — перед публикацией
+// его должен проверить юрист. Обе страницы индексируются (в отличие от
+// /o-dannyh/) — это реальные пользовательские страницы, а не служебная
+// справка.
+router.get("/disclaimer/", (req, res) => {
+  const body = `
+    <div class="legal-page">
+      <p class="draft-note">Черновик. Этот текст подготовлен для проекта автоматически и ещё не проверен юристом — рассматривайте его как основу для доработки, а не как готовый юридический документ.</p>
+      <p>SofiaMap.com — независимый справочник улиц, домов, организаций и общественного транспорта города София. Данные собраны из открытых государственных реестров, картографических источников (в духе OpenStreetMap) и общедоступных публикаций муниципальных структур; полный перечень источников — на странице <a href="/o-dannyh/">«О данных»</a>.</p>
+      <h2>Точность данных</h2>
+      <p>Мы стараемся поддерживать данные актуальными и честно отмечаем случаи, где источники расходятся или где значение (например, часть почтовых индексов) вычислено нами самими, а не взято из официального реестра. Тем не менее сайт не гарантирует полноту, точность или актуальность какой-либо информации: адреса, границы районов, расписания и контакты организаций могут измениться быстрее, чем мы успеваем обновить данные.</p>
+      <h2>Не официальный источник</h2>
+      <p>SofiaMap.com не является органом Столичной общины (Столична община), полиции или иного государственного учреждения и не действует от их имени. Контакты районных администраций и полицейских управлений на карточках домов приведены для удобства и должны сверяться с официальными сайтами соответствующих ведомств перед использованием в важных обращениях.</p>
+      <h2>Ограничение ответственности</h2>
+      <p>Проект и его авторы не несут ответственности за решения, принятые на основании информации с этого сайта, а также за любые прямые или косвенные убытки, связанные с использованием сайта.</p>
+      <h2>Обратная связь</h2>
+      <p>Если вы заметили ошибку или неточность в данных — напишите нам через страницу <a href="/obratnaya-svyaz/">«Обратная связь»</a>.</p>
+    </div>
+  `;
+  res.type("html").send(page({
+    title: "Дисклеймер — SofiaMap",
+    h1: "Дисклеймер",
+    breadcrumbs: [HOME, { label: "Дисклеймер" }],
+    body,
+  }));
+});
+
+router.get("/soglashenie/", (req, res) => {
+  const body = `
+    <div class="legal-page">
+      <p class="draft-note">Черновик. Этот текст подготовлен для проекта автоматически и ещё не проверен юристом — рассматривайте его как основу для доработки, а не как готовый юридический документ.</p>
+      <p>Используя сайт SofiaMap.com, вы соглашаетесь с условиями, изложенными ниже. Если вы не согласны с каким-либо из условий — пожалуйста, не используйте сайт.</p>
+      <h2>Использование сайта</h2>
+      <p>Сайт предоставляется «как есть», в справочных целях, бесплатно и без регистрации. Разрешается свободно просматривать страницы, переходить по ссылкам и пользоваться картой и схемой метро в обычном (не автоматизированном) режиме.</p>
+      <h2>Что запрещено</h2>
+      <p>Запрещается: автоматическое массовое копирование (скрапинг) содержимого сайта без отдельного согласования; попытки нарушить работу сайта или обойти технические ограничения; использование данных сайта способом, вводящим третьих лиц в заблуждение относительно их официального статуса (см. <a href="/disclaimer/">Дисклеймер</a>).</p>
+      <h2>Интеллектуальная собственность</h2>
+      <p>Тексты, оформление и программный код сайта принадлежат проекту SofiaMap.com, если не указано иное. Первичные данные (адресный реестр, картографическая основа, транспортные маршруты и т.п.) взяты из открытых источников — см. <a href="/o-dannyh/">«О данных»</a> — и используются в соответствии с условиями их первоначального распространения.</p>
+      <h2>Изменения условий</h2>
+      <p>Мы можем время от времени обновлять это соглашение; дата последнего изменения будет указываться на этой странице после выхода из черновой стадии.</p>
+      <h2>Связь с нами</h2>
+      <p>По вопросам, связанным с этим соглашением, — страница <a href="/obratnaya-svyaz/">«Обратная связь»</a>.</p>
+    </div>
+  `;
+  res.type("html").send(page({
+    title: "Пользовательское соглашение — SofiaMap",
+    h1: "Пользовательское соглашение",
+    breadcrumbs: [HOME, { label: "Пользовательское соглашение" }],
+    body,
+  }));
+});
+
+// --------------------------------------------------------- /obratnaya-svyaz/
+// Контактная страница без формы — разработка формы обратной связи прямо
+// отложена пользователем ("1. Откладываем разработку"); футер, однако,
+// ссылается на неё уже сейчас (см. htmlPage.js siteFooter()), так что нужен
+// хоть какой-то реальный адрес, а не заглушка/404.
+router.get("/obratnaya-svyaz/", (req, res) => {
+  const body = `
+    <div class="legal-page">
+      <p>Форма обратной связи на сайте пока в разработке. Если вы нашли ошибку в данных, неточность на карте или хотите что-то предложить — сейчас проще всего написать нам напрямую.</p>
+      <p class="meta">Раздел появится на этой странице позже; ошибки в данных также можно уточнить на странице <a href="/o-dannyh/">«О данных»</a> — там указано, откуда взята информация по каждому дому.</p>
+    </div>
+  `;
+  res.type("html").send(page({
+    title: "Обратная связь — SofiaMap",
+    h1: "Обратная связь",
+    breadcrumbs: [HOME, { label: "Обратная связь" }],
+    body,
   }));
 });
 

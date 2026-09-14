@@ -191,18 +191,181 @@
   }
 
   // ---- rendering: result rows -------------------------------------------------
+  // "Открыть страницу" (2026-09-09, claude/search-results-plan.md) —
+  // replaces the old "Подробнее" wording, and unlike it is a REAL link to
+  // the object's own page (search.js's `href`), opened in a new tab; the
+  // row itself keeps doing exactly what it always did (choose() -> select
+  // on the map, inline card) — this is an extra way in, not a replacement
+  // for that. `href` is only ever missing for a handful of types this
+  // dataset has no static page for yet (e.g. an "airport" terminal) — no
+  // link renders for those rather than pointing at a guess.
   function resultRow(item, index) {
     const isRubric = item.type === "rubric";
     const row = document.createElement("div");
     row.className = "map-search-result" + (isRubric ? " map-search-result--rubric" : "");
     row.dataset.index = String(index);
+    const openLink = item.href
+      ? `<a class="map-search-result__open" href="${esc(item.href)}" target="_blank" rel="noopener">Открыть страницу</a>`
+      : "";
     row.innerHTML = `
       <span class="map-search-result__icon">${ICONS[TYPE_GROUP[item.type] || "place"]}</span>
       <span class="map-search-result__text">
         <strong>${esc(item.name)}</strong>
         <span>${esc(item.subtitle || TYPE_LABEL[item.type] || "")}</span>
+        ${openLink}
       </span>`;
-    row.addEventListener("click", () => choose(index));
+    row.addEventListener("click", (e) => {
+      // The link handles its own navigation (new tab) — a click on it
+      // shouldn't also pick this row on the map underneath it.
+      if (e.target.closest(".map-search-result__open")) return;
+      choose(index);
+    });
+    return row;
+  }
+
+  // "Связанные объекты" (2026-09-09, claude/search-results-plan.md) — a
+  // street result's first few real houses (search.js's `related`/
+  // `related_total`), nested right under its row instead of leaving the
+  // street as a bare, childless entry. "Показать все N" reuses the exact
+  // same street->houses drill-down a click on the row itself already opens
+  // (loadStreetHouses via choose()) — no separate flow to maintain.
+  //
+  // 2026-09-14 (claude/next-steps-rubric-grouping.md, search-results-plan.md
+  // §6, second wave): the same block now also renders for a `rubric` result
+  // — its first few organizations (same `related`/`related_total` fields,
+  // just built from rubricsDirectory.getCompaniesForRubric on the server —
+  // see search.js). A rubric's block gets its own heading ("Организации" —
+  // these ARE the category's members, not "related" objects) and a second
+  // action, "Показать все на карте" (decision 2 of §6.1), that plots every
+  // organization of the rubric on the map without leaving the current
+  // results list — unlike "Показать все N", which (via choose() ->
+  // loadRubric(), already existing before this wave from clicking the row
+  // itself) replaces the panel with the full browsable company list.
+  function relatedBlock(item, index) {
+    if (!item.related || !item.related.length) return null;
+    const isRubric = item.type === "rubric";
+    const box = document.createElement("div");
+    box.className = "map-search-related" + (isRubric ? " map-search-related--rubric" : "");
+    box.innerHTML = `
+      <div class="map-search-related__title">${isRubric ? "Организации" : "Связанные объекты"}</div>
+      ${item.related
+        .map(
+          (r) => `
+        <div class="map-search-related__row">
+          <span>${esc(r.name)}</span>
+          ${r.href ? `<a href="${esc(r.href)}" target="_blank" rel="noopener">Открыть страницу</a>` : ""}
+        </div>`
+        )
+        .join("")}
+      <div class="map-search-related__actions">
+        ${
+          item.related_total > item.related.length
+            ? `<button class="map-search-related__more" type="button">Показать все ${item.related_total}</button>`
+            : ""
+        }
+        ${isRubric ? `<button class="map-search-related__onmap" type="button">Показать все на карте</button>` : ""}
+      </div>`;
+    const more = box.querySelector(".map-search-related__more");
+    if (more) more.addEventListener("click", () => choose(index));
+    const onMap = box.querySelector(".map-search-related__onmap");
+    if (onMap) onMap.addEventListener("click", () => showRubricOnMap(item));
+    return box;
+  }
+
+  // "Показать все на карте" (2026-09-14, second wave) — a lighter-weight
+  // sibling of "Показать все N": plots every organization of this rubric as
+  // a point on the map and fits the view to them, but (unlike loadRubric(),
+  // which "Показать все N"/clicking the row triggers) does NOT replace the
+  // results panel with the full browsable list — the current search results
+  // stay exactly as they were. Reuses the same /api/rubric/:name endpoint
+  // the full-list drill-down already fetches from.
+  async function showRubricOnMap(item) {
+    const data = await apiRubric(item.name);
+    const mapped = (data.items || []).filter((r) => r.lat != null && r.lng != null);
+    setSearchPoints(
+      mapped.map((r) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [r.lng, r.lat] },
+        properties: { name: r.name, type: "company" },
+      }))
+    );
+    if (mapped.length) fitBoundsCoords(mapped.map((r) => [r.lng, r.lat]));
+  }
+
+  // "Ещё N улиц с таким названием" (2026-09-14, fourth wave — search.js's
+  // `namesakes`/`namesakes_total`, decision B1 in search-results-plan.md
+  // §8.2/§9): Sofia genuinely has several real, physically unconnected
+  // streets sharing one name (up to ~10 for "Витоша") — the server now
+  // sends only ONE of them as this row's own result, with the rest riding
+  // along here as a compact, collapsed-by-default note instead of each
+  // becoming its own top-level row. Same "explain the quirk, don't hide
+  // it" idea as the existing note on the static street page
+  // (routes/pages.js), just structured data the frontend renders (and can
+  // expand inline, since every namesake already carries its own small
+  // house preview from the server) rather than a fixed HTML string.
+  function namesakesBlock(item) {
+    if (!item.namesakes || !item.namesakes.length) return null;
+    const box = document.createElement("div");
+    box.className = "map-search-namesakes";
+    const preview = item.namesakes
+      .map((n) => esc((n.subtitle || "").replace(/^Улица\s*·\s*/, "") || n.name))
+      .filter(Boolean)
+      .join(", ");
+    box.innerHTML = `
+      <p class="map-search-namesakes__note">
+        ℹ Название «${esc(item.name)}» в Столичной общине встречается ещё в ${item.namesakes_total} мест${
+      item.namesakes_total === 1 ? "е" : "ах"
+    } — это отдельные, физически не связанные улицы${preview ? `: ${preview}` : ""}.
+        <button class="map-search-namesakes__toggle" type="button">Показать</button>
+      </p>
+      <div class="map-search-namesakes__list" hidden></div>`;
+    const toggle = box.querySelector(".map-search-namesakes__toggle");
+    const list = box.querySelector(".map-search-namesakes__list");
+    toggle.addEventListener("click", () => {
+      const willShow = list.hidden;
+      list.hidden = !willShow;
+      toggle.textContent = willShow ? "Скрыть" : "Показать";
+      if (willShow && !list.dataset.rendered) {
+        list.dataset.rendered = "1";
+        item.namesakes.forEach((n) => list.appendChild(namesakeRow(n)));
+      }
+    });
+    return box;
+  }
+
+  // One namesake, rendered like a miniature version of a normal street
+  // result row + its own "Связанные объекты" preview — the server already
+  // built both (search.js), this just nests them one level deeper instead
+  // of as siblings in the main results list.
+  function namesakeRow(n) {
+    const row = document.createElement("div");
+    row.className = "map-search-namesake";
+    const openLink = n.href
+      ? `<a class="map-search-namesake__open" href="${esc(n.href)}" target="_blank" rel="noopener">Открыть страницу</a>`
+      : "";
+    const houses =
+      n.related && n.related.length
+        ? `<div class="map-search-namesake__houses">${n.related
+            .map(
+              (h) => `
+          <div class="map-search-related__row">
+            <span>${esc(h.name)}</span>
+            ${h.href ? `<a href="${esc(h.href)}" target="_blank" rel="noopener">Открыть страницу</a>` : ""}
+          </div>`
+            )
+            .join("")}${
+            n.related_total > n.related.length
+              ? `<span class="map-search-namesake__more-note">и ещё ${n.related_total - n.related.length}</span>`
+              : ""
+          }</div>`
+        : "";
+    row.innerHTML = `
+      <div class="map-search-namesake__head">
+        <strong>${esc(n.name)}</strong>
+        <span>${esc(n.subtitle || "")}</span>
+        ${openLink}
+      </div>
+      ${houses}`;
     return row;
   }
 
@@ -224,6 +387,10 @@
         lastGroup = group;
       }
       els.results.appendChild(resultRow(item, i));
+      const related = relatedBlock(item, i);
+      if (related) els.results.appendChild(related);
+      const namesakes = namesakesBlock(item);
+      if (namesakes) els.results.appendChild(namesakes);
     });
 
     setSearchPoints(
@@ -1212,9 +1379,18 @@
     if (layerId === "search-points") {
       const item = results[props.index];
       if (!item) return;
-      const action = '<button class="map-hover-popup__link js-hover-more" type="button">Подробнее →</button>';
+      // 2026-09-09 (claude/search-results-plan.md): "Открыть страницу"
+      // replaces "Подробнее" here and is a REAL link (new tab) to the
+      // object's own page (search.js's `href`) rather than another way to
+      // trigger the same in-panel card a plain click on the marker/row
+      // already opens. Falls back to the old button when this particular
+      // result has no page yet (href is null for a few types this dataset
+      // has no static page for, e.g. an "airport" terminal).
+      const action = item.href
+        ? `<a class="map-hover-popup__link" href="${esc(item.href)}" target="_blank" rel="noopener">Открыть страницу →</a>`
+        : '<button class="map-hover-popup__link js-hover-more" type="button">Подробнее →</button>';
       revealPopup(lngLat, hoverPopupHtml(item.name, item.subtitle || TYPE_LABEL[item.type] || "", action));
-      bindHoverAction("result", { index: props.index });
+      if (!item.href) bindHoverAction("result", { index: props.index });
       return;
     }
     // A cluster isn't one named object — there's nothing a popup could

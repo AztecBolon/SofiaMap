@@ -17,6 +17,7 @@ const { clusterStreetSegments, representativePoint, dedupeLabels, distancePointT
 const { createSlugAssigner } = require("./slugify");
 const { buildAlphaIndex } = require("./alphaIndex");
 const { splitDesignation } = require("./streetDesignation");
+const { priorityRank, sourceLabel } = require("./housenumberProvenance");
 
 // ---- street "type" classification (task requirement #4: document it) -----
 //
@@ -98,6 +99,13 @@ function dominantHighway(segments) {
 
 let cache = null;
 
+// slug -> { segments, bbox, repPoint: [lon,lat]|null } — declared here (not
+// next to getClusterGeometry further down) because build() below now
+// populates it directly, computed once per cluster as part of the SAME
+// pass that already clusters every name's segments — see that pass's own
+// comment for why (2026-09-14, §12.5).
+const clusterGeomCache = new Map();
+
 function build() {
   const t0 = Date.now();
   const rows = db.prepare(`SELECT osm_id, name, highway, geometry FROM streets WHERE name != ''`).all();
@@ -115,6 +123,20 @@ function build() {
   const assignSlug = createSlugAssigner();
   const bySlug = new Map();
   const byRepId = new Map();
+  // 2026-09-14 (search sandbox §12.5): name -> every directory entry for
+  // that name, in the same deterministic (lowest-osm_id-first) order the
+  // loop below builds them in. Added so routes/search.js's street
+  // sub-search can look up an already-clustered, already-district-labelled
+  // set of entries for a matched name in O(1), instead of re-running
+  // clusterStreetSegments/representativePoint/nearestDistrict/dedupeLabels
+  // from scratch on every single search request — this whole module exists
+  // BECAUSE that clustering is worth doing once and keeping in memory (see
+  // the file-top comment), but search.js wasn't actually reusing it, it
+  // was redoing the same work per request. Measured cost of that
+  // duplication: ~180-210ms added to any search whose matched street names
+  // have several segments/clusters (e.g. "Витоша", ~10 real streets) —
+  // confirmed via isolated `type=streets` timing before this fix existed.
+  const entriesByName = new Map();
   const entries = [];
 
   // Deterministic order (sorted names, then lowest-osm_id-first clusters)
@@ -129,9 +151,20 @@ function build() {
     }));
     clusters.sort((a, b) => a.rep.osm_id - b.rep.osm_id);
 
-    const rawLabels = clusters.map(({ rep }) => {
+    // Representative point per cluster, computed ONCE here and reused both
+    // for the district-disambiguation lookup right below AND for
+    // `clusterGeomCache` (populated in the forEach below) — see that
+    // cache's own declaration comment for why (2026-09-14, §12.5): this
+    // used to be computed a second time, independently, by
+    // getClusterGeometry() on that entry's first live use, which for a
+    // busy multi-cluster name (10 clusters for "Витоша") meant redoing the
+    // same O(segments²) clustering work again — and doing so lazily, as a
+    // multi-hundred-ms spike on whichever real user's search happened to
+    // hit that name first, rather than once, here, at server startup.
+    const points = clusters.map(({ rep }) => representativePoint(rep.geometry));
+    const rawLabels = clusters.map(({ rep }, i) => {
       if (clusters.length <= 1) return null;
-      const point = representativePoint(rep.geometry);
+      const point = points[i];
       const d = point ? nearestDistrict.get({ lat: point[1], lon: point[0] }) : null;
       return d ? d.name : null;
     });
@@ -161,17 +194,43 @@ function build() {
       bySlug.set(slug, entry);
       byRepId.set(rep.osm_id, entry);
       entries.push(entry);
+      if (!entriesByName.has(name)) entriesByName.set(name, []);
+      entriesByName.get(name).push(entry);
+
+      // Populate clusterGeomCache directly from the geometry this pass
+      // already has in hand (`cluster`'s own segments, `points[i]`) instead
+      // of leaving getClusterGeometry() to re-derive it later — see the
+      // cache's declaration comment and `points`' comment above for why.
+      let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+      for (const seg of cluster) {
+        for (const [lon, lat] of allPoints(seg.geometry)) {
+          if (lat < minLat) minLat = lat;
+          if (lat > maxLat) maxLat = lat;
+          if (lon < minLon) minLon = lon;
+          if (lon > maxLon) maxLon = lon;
+        }
+      }
+      const bbox = Number.isFinite(minLat) ? { minLat, maxLat, minLon, maxLon } : null;
+      clusterGeomCache.set(slug, { segments: cluster, bbox, repPoint: points[i] });
     });
   }
 
   const alpha = buildAlphaIndex(entries);
   console.log(`[streetsDirectory] indexed ${entries.length} street clusters from ${names.length} names in ${Date.now() - t0}ms`);
-  return { entries, bySlug, byRepId, alpha };
+  return { entries, bySlug, byRepId, entriesByName, alpha };
 }
 
 function get() {
   if (!cache) cache = build();
   return cache;
+}
+
+// O(1) lookup of every already-clustered, already-district-labelled
+// directory entry for one exact street name — see entriesByName's own
+// comment in build() for why this exists (routes/search.js's street
+// sub-search, avoiding a per-request re-cluster).
+function getEntriesByName(name) {
+  return get().entriesByName.get(name) || [];
 }
 
 // Type-filtered view of the same entries, re-indexed into its own
@@ -218,11 +277,6 @@ function typeCounts() {
 // can show a citation (official registry) or an honest disclaimer
 // (computed/disputed) instead of presenting every value with equal,
 // unearned authority — see lib/postcodeProvenance.js.
-const buildingsByStreetName = db.prepare(`
-  SELECT id, name, addr_street, housenumber, lat, lon, building, geometry, levels, postcode, postcode_src
-  FROM buildings
-  WHERE lower_u(addr_street) = lower_u(@name) AND (name != '' OR housenumber != '')
-`);
 const streetsByName = db.prepare(`SELECT osm_id, name, geometry FROM streets WHERE lower_u(name) = lower_u(@name)`);
 const HOUSE_STREET_MAX_M = 400;
 
@@ -240,7 +294,16 @@ function housenumberSortKey(hn) {
 // it's pulled out of getHousesForEntry into its own cached lookup rather
 // than each caller re-deriving "which of this name's segments are actually
 // THIS cluster" independently.
-const clusterGeomCache = new Map(); // slug -> { segments, bbox, repPoint: [lon,lat]|null }
+// 2026-09-14 (§12.5): build() above now populates clusterGeomCache directly
+// for every entry it creates, as part of the SAME clustering pass — so the
+// cache-hit path below is the only path any entry produced by get()/build()
+// ever takes. The re-fetch-and-recluster logic that used to run here on a
+// cache MISS is kept only as a defensive fallback for an entry that somehow
+// didn't come from build() (there is currently no such caller) — it should
+// never fire in normal operation, and if it ever does, it's no longer free:
+// see build()'s own comment for why redoing this per-entry, lazily, used to
+// mean a multi-hundred-ms-to-low-seconds spike on whichever request first
+// touched a busy multi-cluster name.
 function getClusterGeometry(entry) {
   if (clusterGeomCache.has(entry.slug)) return clusterGeomCache.get(entry.slug);
 
@@ -280,6 +343,62 @@ function distanceToCluster(lat, lon, segments) {
   return best;
 }
 
+// 2026-09-14 (§12.5): this used to run a `lower_u(addr_street) =
+// lower_u(@name)` SQL query, once per distinct street NAME, cached in a
+// Map keyed by name (replacing an even earlier version that re-ran it once
+// PER CLUSTER — a busy multi-cluster name like "Витоша", with 10 clusters,
+// was paying the query 10 separate times on its first live search; caching
+// per name instead of per cluster fixed that specific case).
+//
+// 2026-09-14 (§14.x, root cause of the persistent "slow first search"
+// regression found after the 12→3 Meilisearch index consolidation):
+// per-name caching only helps when the SAME name is searched again. It does
+// nothing for a query whose matched addresses span many DIFFERENT,
+// never-before-cached street names — e.g. a generic term like "улица" or
+// "парк" — and every one of those still paid the underlying query in full.
+// That query itself is the real problem: wrapping the column in `lower_u()`
+// means SQLite can't use `idx_buildings_street` (confirmed via
+// `EXPLAIN QUERY PLAN`: `SCAN buildings`, not a seek) — every call is a full
+// scan of all 112k+ rows with a per-row UDF callback, ~150-175ms
+// REGARDLESS of match count (benchmarked: "Витоша"/313 rows 174ms,
+// "Оборище"/128 rows 165ms, a made-up street/0 rows 154ms — the cost is the
+// scan, not the result set). That's exactly the shape of the reported
+// regression (7-17s on the user's Windows machine for a search whose
+// results touched several distinct streets, fast on any repeat search of
+// the same term once everything it touched was cached).
+//
+// Fixed the same way every other per-request-recompute cost in this file
+// already is (entriesByName, clusterGeomCache): one full table scan, once,
+// up front, grouped into a plain JS Map keyed by the already-lowercased
+// name. `lower_u()` IS just `String.toLowerCase()` (see db.js's UDF
+// registration), so this is behaviour-identical to the old query — just
+// index-able, because the "index" is now the Map itself.
+function buildBuildingsByStreetIndex() {
+  const t0 = Date.now();
+  const rows = db
+    .prepare(
+      `SELECT id, name, addr_street, housenumber, housenumber_src, lat, lon, building, geometry, levels, postcode, postcode_src
+       FROM buildings
+       WHERE name != '' OR housenumber != ''`
+    )
+    .all();
+  const index = new Map(); // lowercased addr_street -> raw building rows[]
+  for (const row of rows) {
+    const key = String(row.addr_street || "").toLowerCase();
+    let list = index.get(key);
+    if (!list) index.set(key, (list = []));
+    list.push(row);
+  }
+  console.log(
+    `[streetsDirectory] indexed ${rows.length} buildings by street name (${index.size} names) in ${Date.now() - t0}ms`
+  );
+  return index;
+}
+const buildingsByStreetIndex = buildBuildingsByStreetIndex();
+function getBuildingsForName(name) {
+  return buildingsByStreetIndex.get(String(name || "").toLowerCase()) || [];
+}
+
 const houseCache = new Map(); // slug -> houses[]
 
 function getHousesForEntry(entry) {
@@ -289,16 +408,28 @@ function getHousesForEntry(entry) {
 
   const houseSlug = createSlugAssigner();
 
-  const matched = buildingsByStreetName
-    .all({ name: entry.name })
+  const matched = getBuildingsForName(entry.name)
     .map((b) => ({ ...b, _d: distanceToCluster(b.lat, b.lon, myCluster) }))
     .filter((b) => b._d <= HOUSE_STREET_MAX_M)
-    .sort((a, b) => housenumberSortKey(a.housenumber) - housenumberSortKey(b.housenumber) || String(a.housenumber || "").localeCompare(String(b.housenumber || ""), "bg"));
+    .sort(
+      (a, b) =>
+        housenumberSortKey(a.housenumber) - housenumberSortKey(b.housenumber) ||
+        String(a.housenumber || "").localeCompare(String(b.housenumber || ""), "bg") ||
+        // Same civic number, several building rows (see housenumberProvenance.js):
+        // order them by the same priority the dedup step below uses to pick the
+        // "main" one, so THAT one is also the first to claim the bare slug from
+        // houseSlug() below — otherwise the demoted duplicate could end up with
+        // the clean "dom-7.html" URL while the address shown as primary gets
+        // stuck with "dom-7-2.html", which reads as backwards.
+        priorityRank(a.housenumber_src) - priorityRank(b.housenumber_src) ||
+        a.id - b.id
+    );
 
   const houses = matched.map((b) => ({
     id: b.id,
     name: b.name || null,
     housenumber: b.housenumber || null,
+    housenumber_src: b.housenumber_src || null,
     displayName: b.name || (b.housenumber ? `${entry.displayName} ${b.housenumber}` : entry.displayName),
     slug: houseSlug(b.housenumber || b.name, `dom-${b.id}`),
     // Raw building fields for the detail page's own blocks (see §3/§5/§6/§12
@@ -312,9 +443,78 @@ function getHousesForEntry(entry) {
     postcode: b.postcode || null,
     postcode_src: b.postcode_src || null,
     addr_street: b.addr_street,
+    // Filled in below when this civic number has more than one building row
+    // (see housenumberProvenance.js) — `variants` lives on whichever row is
+    // picked as the address's main entry, `variantOf` on every other row.
+    variants: [],
+    variantOf: null,
   }));
+
+  // ---- collapse duplicate building rows for the same civic number --------
+  // (2026-09-09 fix, reported live: "ул. Жамбилица 1" listed three times).
+  // Only real, non-empty housenumbers are grouped — there's no address to
+  // merge on for a nameless, numberless row, and grouping by empty string
+  // would wrongly lump together unrelated buildings that just lack a number.
+  const groups = new Map(); // housenumber -> house[]
+  for (const h of houses) {
+    const key = (h.housenumber || "").trim();
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(h);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const sorted = group
+      .slice()
+      .sort((a, b) => priorityRank(a.housenumber_src) - priorityRank(b.housenumber_src) || a.id - b.id);
+    const [primary, ...rest] = sorted;
+    primary.variants = rest.map((v) => ({ id: v.id, slug: v.slug, housenumber_src: v.housenumber_src, sourceLabel: sourceLabel(v.housenumber_src) }));
+    for (const v of rest) {
+      v.variantOf = { slug: primary.slug, displayName: primary.displayName, housenumber_src: primary.housenumber_src, sourceLabel: sourceLabel(primary.housenumber_src) };
+    }
+  }
+
   houseCache.set(entry.slug, houses);
   return houses;
 }
 
-module.exports = { get, getForType, typeCounts, getHousesForEntry, getClusterGeometry, distanceToCluster, TYPE_LABELS, classifyType };
+// Reverse lookup: a bare (street name, building id) pair — all
+// /api/search's "address" sub-search has, straight off the `buildings`
+// table — to that building's own house entry (slug + variants) on the
+// matching street-directory entry, for linking search results to a real
+// /streets/.../dom-....html page (2026-09-09, claude/search-results-plan.md).
+// Same shape as rubricsDirectory.getCompanyLink()/stopsDirectory.getStopById()
+// — the caller only ever has an id, not a directory slug. A name can
+// resolve to more than one physical street cluster (streetCluster.js), so
+// every candidate entry for that name is checked.
+//
+// Cached PER NAME (not a naive `entries.filter()` + `.find()` on every
+// single call): a plain address search can return up to a dozen rows on
+// the SAME street, and `/api/search` calls this once per row — without the
+// cache that's a dozen full linear scans of every candidate cluster's WHOLE
+// house list per request (measured: a busy street like "бул. Витоша" — 149
+// houses — pushed one search past 400ms). Built once per name, first time
+// any address on it needs a link, and kept for the process lifetime — same
+// "DB is opened read-only and never changes" justification `get()`'s own
+// cache already relies on.
+const houseIndexByName = new Map(); // street name -> Map(buildingId -> {entry, house})
+function houseIndexForName(streetName) {
+  if (houseIndexByName.has(streetName)) return houseIndexByName.get(streetName);
+  const index = new Map();
+  for (const entry of get().entries.filter((e) => e.name === streetName)) {
+    for (const house of getHousesForEntry(entry)) {
+      if (!index.has(house.id)) index.set(house.id, { entry, house });
+    }
+  }
+  houseIndexByName.set(streetName, index);
+  return index;
+}
+function findHouseByBuildingId(streetName, buildingId) {
+  if (!streetName) return null;
+  return houseIndexForName(streetName).get(buildingId) || null;
+}
+
+module.exports = {
+  get, getForType, typeCounts, getHousesForEntry, getClusterGeometry, distanceToCluster, TYPE_LABELS, classifyType,
+  findHouseByBuildingId, getEntriesByName,
+};
