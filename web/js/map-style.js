@@ -209,6 +209,69 @@ const LANES_BWD = ["case",
 ];
 const LANE_CLASS_FILTER = ["in", ["get", "highway"], ["literal", LANE_CLASSES]];
 
+// ---- roads-hit width, lane-aware (2026-09-15, map-display point 3) --------
+// `roads-hit` (the invisible wide click/hover proxy over "roads", further
+// below) used a single fixed width curve (10px→14, 16px→22) sized for the
+// ONE schematic line every road draws by default. Once a road qualifies for
+// per-lane rendering (buildLaneLayers() above, LANE_MINZOOM=15+), its real
+// drawn width can be much more than that flat curve — up to LANE_MAX_SLOTS
+// (4) lanes each way × LANE_W_MAX (7.5px) ≈ 60px on a wide boulevard — so a
+// click on an outer lane, away from the centerline, missed the hit zone
+// entirely (reported: clicking anywhere but the middle of a wide multi-lane
+// road did nothing).
+//
+// Fix: for exactly the roads/zooms buildLaneLayers() actually widens (same
+// LANE_CLASS_FILTER, same LANE_MINZOOM), size roads-hit to the real drawn
+// lane-stack width instead of the flat curve — never narrower than the flat
+// curve (`["max", ...]` below), so nothing shrinks for a road with thin lane
+// data. Roads with no lane data at all (LANES_FWD/LANES_BWD both computing
+// to 0 — see those expressions above) keep exactly the old flat curve,
+// unchanged, since ROADS_HIT_HAS_LANES is false for them.
+//
+// The whole thing has to stay ONE top-level `interpolate` over `["zoom"]`
+// (see LANE_W's own comment above for why: the style spec only allows a
+// `["zoom"]` read as the direct, un-nested input to its own interpolate/step
+// — no reusing an interpolate's RESULT in further arithmetic). So each
+// stop's value below is a plain per-feature `case` expression (no zoom
+// inside it), and the "what would LANE_W/the flat curve evaluate to at
+// THIS stop's zoom" numbers are computed here in plain JS instead — exactly
+// the same trick laneOffsetExpr() already uses for the lane offsets
+// themselves.
+function roadsHitBaseWidthAt(zoom) {
+  // The original (10,14)-(16,22) roads-hit curve, evaluated at a fixed zoom.
+  const t = Math.max(0, Math.min(1, (zoom - 10) / (16 - 10)));
+  return 14 + (22 - 14) * t;
+}
+function roadsHitLaneWidthAt(zoom) {
+  // Mirrors LANE_W's own (LANE_MINZOOM,LANE_W_MIN)-(18,LANE_W_MAX) curve —
+  // "one lane's width in px" at a fixed zoom.
+  const t = Math.max(0, Math.min(1, (zoom - LANE_MINZOOM) / (18 - LANE_MINZOOM)));
+  return LANE_W_MIN + (LANE_W_MAX - LANE_W_MIN) * t;
+}
+// How many lane "slots" wide the drawn stack is on each side, capped the
+// same way buildLaneLayers() caps how many slot layers it actually draws
+// (LANE_MAX_SLOTS) — a road tagged lanes=9 still only ever draws 4 slots
+// per direction, so the hit zone shouldn't claim to be wider than that.
+const ROADS_HIT_EDGE_SLOTS = ["+", ["min", LANES_FWD, LANE_MAX_SLOTS], ["min", LANES_BWD, LANE_MAX_SLOTS]];
+const ROADS_HIT_HAS_LANES = ["all", LANE_CLASS_FILTER, [">", ROADS_HIT_EDGE_SLOTS, 0]];
+// A little slop beyond the exact drawn edge so the hit zone is comfortably
+// ≥ the visible lane stack, not exactly flush with its outer pixel.
+const ROADS_HIT_LANE_PAD = 6;
+function roadsHitWidthStop(zoom) {
+  const base = roadsHitBaseWidthAt(zoom);
+  if (zoom < LANE_MINZOOM) return base; // lanes aren't drawn below LANE_MINZOOM at all yet
+  const laneW = roadsHitLaneWidthAt(zoom);
+  return ["case", ROADS_HIT_HAS_LANES, ["max", ["+", ["*", ROADS_HIT_EDGE_SLOTS, laneW], ROADS_HIT_LANE_PAD], base], base];
+}
+const ROADS_HIT_WIDTH_EXPR = [
+  "interpolate", ["linear"], ["zoom"],
+  10, roadsHitWidthStop(10),
+  14, roadsHitWidthStop(14),
+  LANE_MINZOOM, roadsHitWidthStop(LANE_MINZOOM),
+  16, roadsHitWidthStop(16),
+  18, roadsHitWidthStop(18),
+];
+
 function buildLaneLayers() {
   const layers = [];
 
@@ -284,41 +347,19 @@ function buildLaneLayers() {
     layout: { "line-cap": "round", "line-join": "round" },
   });
 
-  // Direction chevrons, repeated along the line via MapLibre's own line-
-  // placement spacing — a plain "^" from the same self-hosted Basic Latin
-  // glyph range every other label on this map already uses (no new font
-  // or icon asset to add). `text-rotation-alignment: "map"` turns it to
-  // the line's own bearing; the backward layer adds another 180° on top so
-  // it points the other way. `text-offset`'s Y component, for a
-  // line-placed symbol, is read in that same rotated frame — so it nudges
-  // the glyph sideways into that direction's own lane block instead of
-  // sitting on the shared centerline. This offset is in font-size ("em")
-  // units, a different unit system than LANE_W's pixels, so it's a
-  // separate best-effort constant, not derived from LANE_W — nudge
-  // CHEVRON_OFFSET_EM if the chevrons don't land inside their lane block
-  // at the zoom you're checking.
-  const CHEVRON_OFFSET_EM = 1.6;
-  const CHEVRON_LAYOUT_BASE = {
-    "symbol-placement": "line", "symbol-spacing": 70,
-    "text-field": "^", "text-font": ["Noto Sans Regular"],
-    "text-size": ["interpolate", ["linear"], ["zoom"], LANE_MINZOOM, 11, 18, 15],
-    "text-rotation-alignment": "map", "text-pitch-alignment": "map",
-    "text-keep-upright": false, "text-allow-overlap": true, "text-ignore-placement": true,
-  };
-  layers.push({
-    id: "lane-arrows-fwd", type: "symbol", source: "base", "source-layer": "transportation",
-    minzoom: LANE_MINZOOM,
-    filter: ["all", LANE_CLASS_FILTER, [">=", LANES_FWD, 1]],
-    layout: { ...CHEVRON_LAYOUT_BASE, "text-offset": [0, -CHEVRON_OFFSET_EM] },
-    paint: { "text-color": "#7a5a10", "text-opacity": 0.85 },
-  });
-  layers.push({
-    id: "lane-arrows-bwd", type: "symbol", source: "base", "source-layer": "transportation",
-    minzoom: LANE_MINZOOM,
-    filter: ["all", LANE_CLASS_FILTER, [">=", LANES_BWD, 1]],
-    layout: { ...CHEVRON_LAYOUT_BASE, "text-rotate": 180, "text-offset": [0, -CHEVRON_OFFSET_EM] },
-    paint: { "text-color": "#7a5a10", "text-opacity": 0.85 },
-  });
+  // Direction chevrons — REMOVED (2026-09-15, "непонятные галочки на
+  // карте", user's map-display point 1). Used to draw a repeated "^"
+  // symbol along each direction's own lane block (a plain glyph, rotated
+  // to the line's bearing via `text-rotation-alignment: "map"`) to mark
+  // traffic direction. Confirmed against the user's screenshot (chevrons
+  // along бул. Петко Ю. Тодорова) that this — not a browser/OS compass
+  // overlay — is what was being pointed at. Everything else about
+  // per-lane rendering (separate lane fills, dashed same-direction
+  // dividers, the solid two-way centerline) is unchanged; only these two
+  // symbol layers were dropped. If chevrons are wanted back later, this is
+  // the right place to re-add them — see git history of this file for the
+  // removed `CHEVRON_OFFSET_EM`/`CHEVRON_LAYOUT_BASE` constants and the two
+  // `lane-arrows-fwd`/`lane-arrows-bwd` layer definitions.
 
   return layers;
 }
@@ -862,6 +903,30 @@ function buildStyle(quality) {
       // reliable than trying to match vector-tile feature ids back to our
       // own database ids for feature-state highlighting.
       selected: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
+      // "Зона доступности" (claude/next-steps-walkability-isochrone.md):
+      // populated by map-search.js's setIsochroneGeometry() with 1-4
+      // concentric pedestrian walk-time polygons (5/10/15/20 min) from
+      // server/src/routes/isochrone.js. Own source rather than reusing
+      // `selected` above for the same reason `route` below is its own
+      // source: each of the (up to 4) polygons needs its OWN fill color
+      // (see the isochrone-fill/-line layers further down), which the
+      // single-uniform-color `selected` layers don't support — and
+      // `selected`'s non-lite variant draws polygons as 20m-tall
+      // fill-extrusions, which makes no sense for an analytic overlay like
+      // this one (always flat, regardless of render quality).
+      isochrone: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
+      // "Как доехать/дойти" (2026-09-16): populated by map-search.js's
+      // setRouteGeometry() with the CALCULATED itinerary's legs (walk +
+      // transit, one LineString feature per leg — deliberately its own
+      // source rather than reusing `selected` above, since a route needs
+      // several DIFFERENT simultaneous line styles (walk vs. each transit
+      // mode/line color) plus its own point markers (board/transfer/alight),
+      // none of which the single-uniform-color `selected` source supports).
+      route: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
+      // Board/transfer/alight/start/end points along the calculated route,
+      // tagged with a `kind` property the "route-point*" layers below key
+      // their paint off of.
+      routePoints: { type: "geojson", data: { type: "FeatureCollection", features: [] } },
       // Populated on hover (map-search.js) with a search result point's or
       // cluster's geometry — the "hover-point" layer below draws a plain
       // circle for these two, sized via each feature's own `hr` property.
@@ -956,9 +1021,28 @@ function buildStyle(quality) {
             "cemetery", "#d6ddd0", "wetland", "#cfe3e6",
             "#e5e2dd",
           ],
+          // Hover outline (2026-09-15, map-display point 5 — "сделать
+          // кликабельными"): parks/water previously had no reaction to
+          // hover/click at all (unlike buildings/roads/quarters, which each
+          // already had SOME feedback). Rather than a per-category darker
+          // fill (like buildings' BUILDING_FILL_EXPR — this match already
+          // has ~10 branches and a second hover-color table for each would
+          // be a lot of upkeep for a feature that's mostly named parks), a
+          // single accent-colored outline that only appears on hover reads
+          // clearly against every fill color above without needing one.
+          // Transparent (not just omitted) when not hovered, so there's no
+          // always-on outline change to the normal look of the layer.
+          "fill-outline-color": ["case", HOVER, "#6b8f4a", "rgba(0,0,0,0)"],
         },
       },
-      { id: "water", type: "fill", source: "base", "source-layer": "water", paint: { "fill-color": "#aad3e0" } },
+      {
+        id: "water", type: "fill", source: "base", "source-layer": "water",
+        paint: {
+          "fill-color": "#aad3e0",
+          // Same hover-outline treatment as "landuse" above, own accent color.
+          "fill-outline-color": ["case", HOVER, "#3d7f9e", "rgba(0,0,0,0)"],
+        },
+      },
       // Casing (a wider white line drawn under the colored road line, for
       // the "road with an outline" look) doubles the fill-rate cost of the
       // roads layer — every road pixel gets drawn twice, once per layer.
@@ -1019,7 +1103,11 @@ function buildStyle(quality) {
       // neighboring streets in a dense grid at the closest zooms.
       {
         id: "roads-hit", type: "line", source: "base", "source-layer": "transportation",
-        paint: { "line-width": ["interpolate", ["linear"], ["zoom"], 10, 14, 16, 22], "line-opacity": 0 },
+        // Width is lane-aware from 2026-09-15 (map-display point 3) — see
+        // ROADS_HIT_WIDTH_EXPR's own comment above for why a wide multi-lane
+        // boulevard needs (and now gets) a wider hit zone than a plain
+        // single-line street.
+        paint: { "line-width": ROADS_HIT_WIDTH_EXPR, "line-opacity": 0 },
         layout: { "line-cap": "round", "line-join": "round" },
       },
       ...buildRailwayLayers(),
@@ -1064,6 +1152,27 @@ function buildStyle(quality) {
               "fill-extrusion-opacity": 0.9,
             },
           },
+      // "Зона доступности" (claude/next-steps-walkability-isochrone.md) —
+      // deliberately ALWAYS flat fill/line (unlike selected-fill below,
+      // which draws as a fill-extrusion "slab" in non-lite mode): this is
+      // an analytic time-contour overlay, not a highlighted real-world
+      // object, so a fake extruded height would misrepresent it regardless
+      // of render quality. Per-feature color comes straight from Valhalla's
+      // own `color` response property (server/src/routes/isochrone.js sets
+      // one hex color per contour when requesting it; Valhalla echoes it
+      // back on every feature ALREADY "#"-prefixed -- confirmed live, no
+      // client-side "#" concatenation wanted here) -- no client-side color
+      // ramp to keep in sync with the server's choice.
+      // Placed below selected-fill/-line/-point so the actual selected
+      // marker/highlight still reads clearly on top of the shaded zone.
+      {
+        id: "isochrone-fill", type: "fill", source: "isochrone",
+        paint: { "fill-color": ["get", "color"], "fill-opacity": 0.45 },
+      },
+      {
+        id: "isochrone-line", type: "line", source: "isochrone",
+        paint: { "line-color": ["get", "color"], "line-width": 1.5, "line-opacity": 0.9 },
+      },
       lite
         ? {
             id: "selected-fill", type: "fill", source: "selected",
@@ -1095,6 +1204,45 @@ function buildStyle(quality) {
         id: "selected-point", type: "circle", source: "selected",
         filter: ["==", ["geometry-type"], "Point"],
         paint: { "circle-radius": 9, "circle-color": "#9f2f24", "circle-stroke-color": "#fff", "circle-stroke-width": 3 },
+      },
+      // "Как доехать/дойти" route legs (2026-09-16, map-search.js's
+      // setRouteGeometry). Two line layers off the same `route` source,
+      // split by each leg feature's own `mode` property (`WALK` vs.
+      // everything else) so a walk connector reads as a thin dashed
+      // connector and a transit ride reads as a solid line in that leg's
+      // OWN color (Motis returns `routeColor` straight from GTFS — falls
+      // back to a neutral accent client-side when a leg has none).
+      {
+        id: "route-walk-line", type: "line", source: "route",
+        filter: ["==", ["get", "mode"], "WALK"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#555", "line-width": 4, "line-dasharray": [1, 1.6], "line-opacity": 0.9 },
+      },
+      {
+        id: "route-transit-line", type: "line", source: "route",
+        filter: ["!=", ["get", "mode"], "WALK"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": ["coalesce", ["get", "color"], "#3B3FA6"], "line-width": 5.5, "line-opacity": 0.95 },
+      },
+      // Start/board/transfer/alight/end markers along the route (`routePoints`
+      // source, map-search.js's routeLegend/setRouteGeometry) — the same
+      // points the legend panel lists with per-leg minutes, so a person can
+      // match a legend row to its actual spot on the map.
+      {
+        id: "route-points", type: "circle", source: "routePoints",
+        paint: {
+          "circle-radius": ["match", ["get", "kind"], "start", 9, "end", 9, 6],
+          "circle-color": [
+            "match", ["get", "kind"],
+            "start", "#2f7a44",
+            "board", "#1874b0",
+            "transfer", "#a8631a",
+            "alight", "#3B3FA6",
+            "end", "#2E3389",
+            /* fallback */ "#888",
+          ],
+          "circle-stroke-color": "#fff", "circle-stroke-width": 2.5,
+        },
       },
       // No cluster-count text label and no always-on background "overlay
       // routes" layer: the label needed an external glyphs host
@@ -1171,6 +1319,59 @@ function buildStyle(quality) {
         minzoom: lite ? 11 : 10,
         paint: { "circle-radius": 20, "circle-opacity": 0 },
       },
+      // Landuse (park/garden/wood/...) and water name labels (2026-09-15,
+      // map-display point 5) — until now "landuse"/"water" (above) were
+      // fill-only, with no label and no click/hover reaction at all (every
+      // other named area on the map — quarters via place-labels, buildings,
+      // roads — had at least one of the two). No separate invisible "-hit"
+      // proxy layer is needed the way roads-hit/place-labels-hit are: a
+      // park or lake's own fill polygon is already a generously large hit
+      // target (that's the whole point of buildings/roads/quarters needing
+      // a proxy in the first place — their real geometry is a hairline or a
+      // few px of text; a landuse polygon isn't), so "landuse"/"water"
+      // themselves are registered directly in HOVER_LAYERS (map-search.js)
+      // and hovered/clicked like "buildings" already is, no separate hit
+      // layer here. `["has","name"]` keeps this to named features only —
+      // most residential/industrial/commercial landuse polygons carry no
+      // `name` tag in OSM at all, and an unlabeled generic block isn't a
+      // "park" someone is looking to click.
+      // Requires pipeline/sofia-schema.yml's landuse/water layers to carry
+      // a `name` attribute (added alongside this change) and a PMTiles
+      // rebuild before real names show up — until that rebuild ships,
+      // `["has","name"]` is simply always false here, the same graceful
+      // "nothing to draw yet" as any other not-yet-built tile attribute.
+      {
+        id: "landuse-labels", type: "symbol", source: "base", "source-layer": "landuse",
+        filter: ["has", "name"],
+        minzoom: 13,
+        layout: {
+          "text-field": ["get", "name"],
+          "text-font": ["Noto Sans Regular"],
+          "text-size": ["interpolate", ["linear"], ["zoom"], 13, 11, 17, 14],
+          "text-letter-spacing": 0.01,
+        },
+        paint: {
+          "text-color": "#5c7a44",
+          "text-halo-color": "#ffffff",
+          "text-halo-width": 1.2,
+        },
+      },
+      {
+        id: "water-labels", type: "symbol", source: "base", "source-layer": "water",
+        filter: ["has", "name"],
+        minzoom: 12,
+        layout: {
+          "text-field": ["get", "name"],
+          "text-font": ["Noto Sans Regular"],
+          "text-size": ["interpolate", ["linear"], ["zoom"], 12, 11, 17, 14],
+          "text-letter-spacing": 0.01,
+        },
+        paint: {
+          "text-color": "#2f6480",
+          "text-halo-color": "#ffffff",
+          "text-halo-width": 1.2,
+        },
+      },
       // Street names on the map itself (2026-09-05) — separate from search,
       // which already found streets fine; this is what draws their names
       // along the road so the map is legible without searching first. Text
@@ -1216,26 +1417,83 @@ function buildStyle(quality) {
           "text-opacity-transition": { duration: 220 },
         },
       })),
-      // House numbers (2026-09-05) — only ever useful once you're zoomed to
-      // street level, so gated well above where buildings themselves start
-      // rendering (minzoom 13/14): showing a number on every one of
-      // 132,920 buildings from the moment they appear would be pure
-      // clutter, not to mention a lot of glyph layout for no reason at
-      // that zoom. Only buildings with a direct `addr:housenumber` OSM tag
-      // carry this field (~39,500 of 132,920) — see sofia-schema.yml.
+      // House numbers (2026-09-05; lowered + made more legible 2026-09-15,
+      // map-display point 4) — only ever useful once you're zoomed to
+      // street level, so still gated well above where buildings themselves
+      // start rendering, just 2 zooms earlier than before (was 17/18) per
+      // the user's request.
+      //
+      // 2026-09-15 REGRESSION FIX (same day, reported live: "номера домов
+      // вообще пропали"): the first version of this change switched THIS
+      // layer's `source-layer` straight from "building" to a brand-new
+      // "address_point" (pipeline/sofia-schema.yml + pipeline/
+      // export_building_housenumbers.py) — but that layer only exists in a
+      // REBUILT `sofia-base.pmtiles`, and the pipeline rebuild is a manual
+      // step the user hasn't run yet (Planetiler, see that script's own
+      // comment). Against the CURRENT, not-yet-rebuilt tileset,
+      // "address_point" is simply an empty source-layer, so every number —
+      // including the ~39,500 directly-tagged ones that used to show just
+      // fine — vanished outright. Fixed by splitting back into two layers:
+      // this one stays on "building"/`addr:housenumber` (works today,
+      // unchanged data source, only minzoom/legibility improved below), and
+      // a second, ADDITIVE "address-labels-enriched" layer (right below)
+      // reads "address_point" for the extra coverage — which stays
+      // harmlessly empty until the pipeline is actually rebuilt, instead of
+      // replacing a working layer with one that's empty until then.
+      // `pipeline/export_building_housenumbers.py` was also updated
+      // (same day) to only export buildings whose enriched number did NOT
+      // come from the bare tag (`housenumber_src != 'tag'`) — so once the
+      // tileset IS rebuilt, "address-labels-enriched" only adds numbers
+      // this layer doesn't already draw, rather than drawing a second,
+      // overlapping copy of the same ~39,500 numbers.
+      // Legibility (unchanged by the regression fix): text-size is now a
+      // zoom-interpolate (was a flat 11) that grows on closer zooms instead
+      // of staying pinned to the same size a street-level number and a
+      // building-entrance-level number both had before. `text-padding`
+      // trimmed from the 2px MapLibre default so more numbers can pack into
+      // a dense block of small buildings before MapLibre's own collision
+      // detection starts dropping the overflow — collision detection itself
+      // is intentionally left ON (no allow-overlap/ignore-placement):
+      // letting every number always draw regardless of overlap would just
+      // replace "some numbers missing" with "illegible overlapping digits"
+      // in the densest blocks.
       {
         id: "address-labels", type: "symbol", source: "base", "source-layer": "building",
         filter: ["has", "housenumber"],
-        minzoom: lite ? 18 : 17,
+        minzoom: lite ? 16 : 15,
         layout: {
           "text-field": ["get", "housenumber"],
           "text-font": ["Noto Sans Regular"],
-          "text-size": 11,
+          "text-size": ["interpolate", ["linear"], ["zoom"], lite ? 16 : 15, 10, 19, 14],
+          "text-padding": 1,
         },
         paint: {
           "text-color": "#6b6459",
           "text-halo-color": "#ffffff",
-          "text-halo-width": 1.2,
+          "text-halo-width": 1.3,
+        },
+      },
+      // Additive extra coverage (see the regression-fix comment above) —
+      // same look as "address-labels", just a different source-layer, and
+      // harmlessly empty until the pipeline is rebuilt. No
+      // `["has","housenumber"]` filter needed — every feature in
+      // "address_point" already has one, by construction of the export
+      // script, and (post-fix) it already excludes the tag-sourced rows
+      // "address-labels" above draws, so the two layers never draw the same
+      // building twice.
+      {
+        id: "address-labels-enriched", type: "symbol", source: "base", "source-layer": "address_point",
+        minzoom: lite ? 16 : 15,
+        layout: {
+          "text-field": ["get", "housenumber"],
+          "text-font": ["Noto Sans Regular"],
+          "text-size": ["interpolate", ["linear"], ["zoom"], lite ? 16 : 15, 10, 19, 14],
+          "text-padding": 1,
+        },
+        paint: {
+          "text-color": "#6b6459",
+          "text-halo-color": "#ffffff",
+          "text-halo-width": 1.3,
         },
       },
       // Search result markers (points + clusters) — placed AFTER

@@ -18,6 +18,7 @@ const { createSlugAssigner } = require("./slugify");
 const { buildAlphaIndex } = require("./alphaIndex");
 const { splitDesignation } = require("./streetDesignation");
 const { priorityRank, sourceLabel } = require("./housenumberProvenance");
+const { pointInGeometry, bboxOfGeometry } = require("./geo");
 
 // ---- street "type" classification (task requirement #4: document it) -----
 //
@@ -514,7 +515,40 @@ function findHouseByBuildingId(streetName, buildingId) {
   return houseIndexForName(streetName).get(buildingId) || null;
 }
 
+function bboxesOverlap(a, b) {
+  return a.minLon <= b.maxLon && a.maxLon >= b.minLon && a.minLat <= b.maxLat && a.maxLat >= b.minLat;
+}
+
+// 2026-09-15 (district/raion/settlement pages): "which streets run through
+// this polygon" — tested against each cluster's already-cached
+// representative point (getClusterGeometry(entry).repPoint, the same
+// midpoint-of-longest-segment point streetsDirectory already keeps for the
+// map preview/nearest-district lookup — see streetCluster.js's own comment
+// on what it means and doesn't mean), not the street's full geometry. A
+// long street can legitimately run through several districts; testing only
+// its ONE representative point means a street gets attributed to whichever
+// district that particular point happens to fall in, same single-point
+// approximation this file already uses elsewhere (nearestDistrict in
+// build()) — not "every district this street ever touches". Cheap bbox
+// pre-filter first (~6.2k clusters city-wide — fine to bbox-check all of
+// them, but skips the exact ray-casting test for the ones nowhere near this
+// polygon).
+function findStreetsInPolygon(geometry) {
+  const polyBbox = bboxOfGeometry(geometry);
+  if (!polyBbox) return [];
+  const matched = [];
+  for (const entry of get().entries) {
+    const { bbox, repPoint } = getClusterGeometry(entry);
+    if (!bbox || !repPoint) continue;
+    const entryBbox = { minLon: bbox.minLon, minLat: bbox.minLat, maxLon: bbox.maxLon, maxLat: bbox.maxLat };
+    if (!bboxesOverlap(polyBbox, entryBbox)) continue;
+    if (pointInGeometry(repPoint[0], repPoint[1], geometry)) matched.push(entry);
+  }
+  return matched.sort((a, b) => (a.sortKey || a.name).localeCompare(b.sortKey || b.name, "bg"));
+}
+
 module.exports = {
   get, getForType, typeCounts, getHousesForEntry, getClusterGeometry, distanceToCluster, TYPE_LABELS, classifyType,
+  findStreetsInPolygon,
   findHouseByBuildingId, getEntriesByName,
 };

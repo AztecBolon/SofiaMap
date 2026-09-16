@@ -33,6 +33,26 @@ sources:
   osm_lanes:
     type: geojson
     local_path: "raw/sofia_lanes_smoothed.geojson"
+  # Enriched per-building house numbers (2026-09-15, map-display point 4) —
+  # see pipeline/export_building_housenumbers.py. The `building` layer below
+  # still reads `housenumber` straight off the raw OSM `addr:housenumber`
+  # tag (only ~39,500 of 132,920 buildings carry it) because it also
+  # supplies building/height/levels for the SAME features, and those need
+  # to stay untouched raw-tag pass-throughs (see that layer's own comment on
+  # why height/levels arithmetic is deliberately NOT done in this schema).
+  # Re-sourcing the whole `building` layer from sofia.db instead would have
+  # silently changed extruded building heights for every building relying
+  # on a type-based default, since sofia.db's own `buildings.height` column
+  # (parse_full.py's parse_height()) uses a DIFFERENT default-by-type table
+  # than web/js/map-style.js's BUILDING_HEIGHT_EXPR (they've never been kept
+  # in sync, since until now nothing read sofia.db's computed height through
+  # the tile pipeline at all). So instead: a small, separate point layer
+  # (`address_point` below), carrying ONLY the enriched housenumber, wired
+  # to its own new MapLibre layer in map-style.js — no interaction with the
+  # `building` layer's own attributes at all.
+  osm_addresses:
+    type: geojson
+    local_path: "raw/sofia_building_housenumbers.geojson"
 
 layers:
   - id: building
@@ -73,18 +93,24 @@ layers:
 
   - id: water
     features:
-      # Only the water POLYGON is ever styled (flat fill-color, no
-      # data-driven expression, so no attribute is needed at all here). The
-      # waterway LINE feature (small rivers/streams as OSM lines rather than
-      # riverbank polygons) had no matching style layer — a "fill" layer
-      # can't render LineString geometry — so it was being shipped on every
-      # tile from z9 up and never drawn. Dropped for now; add a proper `line`
-      # style layer for it later if visible streams/rivers are wanted.
+      # `name` added 2026-09-15 (map-display point 5, "подтянуть названия
+      # водоёмов + сделать кликабельными") — the water polygon itself was
+      # previously styled with a flat fill-color and no data-driven
+      # expression at all, so no attribute was needed; now `web/js/
+      # map-style.js`'s "water-labels" symbol layer needs the tile's own
+      # OSM `name` tag to draw a label (client-side `["has","name"]` keeps
+      # this to actually-named lakes/reservoirs — most small ponds/streams
+      # have none). The waterway LINE feature (small rivers/streams as OSM
+      # lines rather than riverbank polygons) still has no matching style
+      # layer — a "fill" layer can't render LineString geometry — so it's
+      # still dropped for now; add a proper `line` style layer for it later
+      # if visible streams/rivers are wanted.
       - source: osm
         geometry: polygon
         include_when:
           natural: water
-        attributes: []
+        attributes:
+          - key: name
         min_zoom: 4
 
   - id: place
@@ -111,12 +137,18 @@ layers:
       # (with unsimplified OSM-detail boundaries) were the single heaviest
       # layer per tile (up to ~96KB at z10) — not worth it before you're
       # zoomed in enough to see individual blocks/parks anyway.
+      # `name` added to all three feature blocks below (2026-09-15,
+      # map-display point 5, "подтянуть названия парков + сделать
+      # кликабельными") — web/js/map-style.js's new "landuse-labels" symbol
+      # layer needs it (client-side `["has","name"]` keeps unnamed
+      # residential/industrial/commercial blocks unlabeled, same as before).
       - source: osm
         geometry: polygon
         include_when:
           landuse: [residential, commercial, industrial, retail, cemetery, construction]
         attributes:
           - key: landuse
+          - key: name
         min_zoom: 10
       - source: osm
         geometry: polygon
@@ -124,6 +156,7 @@ layers:
           leisure: [park, garden, pitch, stadium, playground]
         attributes:
           - key: leisure
+          - key: name
         min_zoom: 11
       - source: osm
         geometry: polygon
@@ -131,6 +164,7 @@ layers:
           natural: [wood, scrub, grassland, wetland]
         attributes:
           - key: natural
+          - key: name
         min_zoom: 10
 
   - id: transportation
@@ -292,6 +326,35 @@ layers:
           - key: name
           - key: service
         min_zoom: 10
+
+  - id: address_point
+    features:
+      # Enriched house-number points (2026-09-15, map-display point 4) — see
+      # the long comment on the `osm_addresses` source above for why this is
+      # its own small point layer rather than an extra attribute joined onto
+      # `building`. One point per building whose number sofia.db backfilled
+      # from a source OTHER than the bare tag (official Sofia municipality
+      # address points, NSI census address points, or a standalone OSM
+      # address node — pipeline/export_building_housenumbers.py, source data
+      # documented in server/src/lib/housenumberProvenance.js), at that
+      # building's own centroid.
+      # `housenumber_src = 'tag'` rows are deliberately EXCLUDED by the
+      # export script (2026-09-15, same-day fix after a live regression —
+      # see the export script's own comment): those are exactly the
+      # ~39,500 buildings the `building` layer's own `addr:housenumber`
+      # attribute above already covers directly, so this layer is purely
+      # ADDITIVE coverage, never a duplicate of what "building" already
+      # draws. `include_when` is technically redundant here (the export
+      # script only ever writes rows that already have a housenumber) but
+      # kept for the same defensive-and-self-documenting reason the
+      # `building` layer's own `building: __any__` has it.
+      - source: osm_addresses
+        geometry: point
+        include_when:
+          housenumber: __any__
+        attributes:
+          - key: housenumber
+        min_zoom: 13
 
   # No "boundary" layer here anymore. OSM's tagged admin_level relations
   # inside this extract don't cleanly give "Sofia's outline": admin_level=9

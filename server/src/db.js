@@ -58,4 +58,29 @@ db.pragma("query_only = ON");
 // Register a Unicode-aware lowercase function backed by JS instead.
 db.function("lower_u", { deterministic: true }, (s) => (s == null ? s : String(s).toLowerCase()));
 
+// 2026-09-15 (live report: "ул. Света Екатерина бл. 79" — the exact address
+// this app itself shows for the building — returned "Ничего не найдено" from
+// search). Root cause, confirmed against the real data: `buildings.housenumber`
+// isn't always a bare number — 5443 of 132920 rows (4%) store a BLOCK number
+// with the "бл." (block) designator baked directly into the column, e.g.
+// "бл. 79" rather than "79" (this is real source data, not a bug in the
+// column itself — Bulgarian panel-block addresses are commonly identified by
+// block number rather than a street housenumber). search.js's
+// ADDRESS_WITH_NUMBER query compares the typed number against this column
+// with `=`/GLOB, which can never match a bare "79" against a stored
+// "бл. 79". Registered here (not just in search.js) since it's a general
+// housenumber-normalization concern, the same reasoning `lower_u` above
+// already follows for case-folding. Strips a leading "бл."/"блок" (block)
+// or "вх."/"вход" (entrance) designator — case-insensitively, with or
+// without the trailing dot/spaces — from the column value before it's
+// compared; a housenumber with no such prefix passes through unchanged.
+// Longer alternatives ("блок"/"вход") must come BEFORE their own prefixes
+// ("бл"/"вх") in this alternation — regex alternation tries left-to-right
+// and takes the first match, so with the short forms listed first,
+// "Блок 12" matched only the leading "бл" of "Блок" and left "ок 12"
+// behind (caught by direct testing against real data before this shipped).
+db.function("norm_house", { deterministic: true }, (s) =>
+  s == null ? s : String(s).replace(/^\s*(?:блок|бл|вход|вх)\.?\s*/iu, "").trim()
+);
+
 module.exports = db;

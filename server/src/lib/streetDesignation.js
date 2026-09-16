@@ -34,7 +34,29 @@ const RULES = [
   // (lowercase, unlike a sentence-starting proper name) rather than to
   // whichever casing happens to be more common in this one dataset.
   { re: /^алея\s+/i, canonical: "алея" },
+  // 2026-09-15 (real user report, live site: "ул. Автомагистрала Хемус" —
+  // wrong, should read just "Автомагистрала Хемус", and should alphabetize
+  // under "Х" not "А"). A handful of Sofia's ring-road segments are named
+  // with their OWN road-type word leading the name ("Автомагистрала
+  // Хемус/Европа/Струма/Тракия") — treated as a real designator here, same
+  // as бул./пл./алея above, so it's BOTH kept out of the synthetic "ул."
+  // fallback below AND stripped for `rest`/`sortKey` — same reasoning
+  // already applied to "бул. Симеоновско шосе" filing under "С".
+  { re: /^автомагистрала\s+/i, canonical: "Автомагистрала" },
 ];
+
+// Sibling of RULES above, but for the OTHER Bulgarian naming shape: a name
+// that carries its own road-type word as its LAST token instead of a
+// leading prefix — "Банско шосе", "Ботевградско шосе" (classifyType()
+// already buckets these into "shosseta" via the same words), "Околовръстен
+// път" (ring road), "Път за манастира"/"Път към в.з. Горна баня" (leading
+// "Път" this time). Found while fixing the "Автомагистрала" report above —
+// same underlying bug (the synthetic "ул." fallback below doesn't know
+// these names already say what kind of road they are), just the OPPOSITE
+// word position. Because the type word here is NOT the leading word,
+// alphabetization is already correct off the name's own first word without
+// stripping anything — only the wrongful "ул." prefix needs suppressing.
+const SELF_DESCRIBING = /(^|\s)(шосе|път)$|^път\s+/i;
 
 // { designation, rest, displayName } — `rest` is the name with the
 // designator (and the single space after it) stripped, used as the
@@ -76,6 +98,7 @@ function splitDesignation(name) {
       return { designation: canonical, rest, displayName: rest ? `${canonical} ${rest}` : canonical };
     }
   }
+  if (SELF_DESCRIBING.test(trimmed)) return { designation: null, rest: trimmed, displayName: trimmed };
   return { designation: null, rest: trimmed, displayName: trimmed ? `ул. ${trimmed}` : trimmed };
 }
 

@@ -15,6 +15,7 @@ const routesDir = require("../lib/routesDirectory");
 const stops = require("../lib/stopsDirectory");
 const areas = require("../lib/areasDirectory");
 const raions = require("../lib/raionsDirectory");
+const parks = require("../lib/parksDirectory");
 const districtAdmin = require("../lib/districtAdminContacts");
 const police = require("../lib/policeContacts");
 const orgMatch = require("../lib/orgMatch");
@@ -26,7 +27,9 @@ const { withDesignation } = require("../lib/streetDesignation");
 const { getPostcodeNote, SOURCES } = require("../lib/postcodeProvenance");
 const { sourceLabel: houseSourceLabel } = require("../lib/housenumberProvenance");
 const postcodes = require("../lib/postcodesDirectory");
-const { page, itemList, letterNav, mapLink, esc, blockWrap, miniMapWidget, mapAssetsHead, mapAssetsScripts } = require("../lib/htmlPage");
+const { pointInGeometry } = require("../lib/geo");
+const { page, itemList, letterNav, mapLink, mapSelectLink, esc, blockWrap, miniMapWidget, mapAssetsHead, mapAssetsScripts } = require("../lib/htmlPage");
+const { icon } = require("../lib/icons");
 const metroScheme = require("../lib/metroScheme");
 const { renderMetroPage } = require("../lib/metroSchemeRender");
 
@@ -36,6 +39,9 @@ const router = express.Router();
 // instead of on the first visitor's request — see streetsDirectory.js's
 // comment on why this is a one-time, ~100ms, safe-to-do-eagerly cost.
 streets.get();
+// Same idea for the stop geo-cluster index (2026-09-15) — see
+// stopsDirectory.js's warmClusterIndex().
+stops.warmClusterIndex();
 
 // 2026-09-07: "/" became this landing/hub page itself (was the bare SPA —
 // see index.js's own comment). HOME now means "site root", not "the map".
@@ -65,41 +71,92 @@ router.get("/", (req, res) => {
   const routeTotal = routeCounts.reduce((a, r) => a + r.n, 0);
   const stopCounts = Object.keys(stops.TYPE_LABELS).map((t) => ({ t, n: (stops.getType(t) || { stops: [] }).stops.length }));
   const stopTotal = stopCounts.reduce((a, r) => a + r.n, 0);
+  const districtTotal = areas.getAll("districts").length;
+  const settlementTotal = areas.getAll("settlements").length;
+  const raionTotal = raions.getAll().length;
+  const parkTotal = parks.getAll().length;
+  const indexTotal = postcodes.get().codes.length;
 
-  const seoParagraph = `
-    <p>
-      Интерактивная карта Софии и справочник объектов города: улицы (${streetTotal}), организации
-      (${orgTotal}) по ${rubricRows.length} рубрикам, маршруты общественного транспорта (${routeTotal}),
-      остановки и станции (${stopTotal}), районы, населённые пункты Столичной общины и почтовые индексы
-      каждого дома.
-    </p>
+  // Homepage redesign (2026-09-15, direct request — "сейчас она очень
+  // слаба и скучна"; see claude/next-steps-homepage-design.md for the
+  // diagnosis and claude/design-decisions.md for the brand/nav decisions
+  // this draws on). Replaces the old single SEO paragraph + two bare
+  // arrow-links + flat itemList() of 7 equal rows with: a hero (warm
+  // intro paragraph — still keyword-rich for SEO, just not a dense
+  // counter sentence — + a row of compact stat numbers + two large
+  // primary CTA buttons), then a section-card grid with Улицы/Организации
+  // called out as the two primary entry points and the rest smaller but
+  // carrying the same icon+title+description+count shape. No live map
+  // preview on this page by decision — miniMapWidget()/mini-map.js is
+  // built for one street-level point (fixed zoom 15.5, non-interactive,
+  // no polygons — see that file's own comment), not a city overview, so a
+  // live MapLibre instance here would just be unwarranted weight on the
+  // crawlable entry page.
+  const heroStats = [
+    { n: streetTotal, label: "улиц" },
+    { n: orgTotal, label: "организаций" },
+    { n: routeTotal, label: "маршрутов" },
+    { n: stopTotal, label: "остановок" },
+  ].map((s) => `<li><strong>${esc(s.n)}</strong><span>${esc(s.label)}</span></li>`).join("");
+
+  const hero = `
+    <section class="home-hero">
+      <p class="home-hero__lead">SofiaMap — открытый справочник и живая карта Софии. Здесь можно быстро найти точный адрес дома, организацию по рубрике, маршрут или остановку транспорта, узнать район и почтовый индекс — по официальным и открытым данным города.</p>
+      <ul class="home-stats">${heroStats}</ul>
+      <div class="home-hero__actions">
+        <a class="home-cta home-cta--primary" href="/map/">${icon("mapPin", 18)}Открыть интерактивную карту</a>
+        <a class="home-cta home-cta--secondary" href="/metro/">${icon("externalLink", 18)}Схема метро</a>
+      </div>
+    </section>
   `;
 
-  // Two equal-weight entry points (2026-09-07, by direct request — "равнозначную
-  // ссылке на карту"): the interactive geographic map, and the schematic metro
-  // diagram (still in development — see claude/metro-scheme-plan.md — so this
-  // links to an honest "в разработке" page for now, not a fabricated finished
-  // one; the URL and its equal billing on the homepage are real from day one).
-  const mapCta = `
-    <p class="map-cta">
-      <a class="map-link" href="/map/">Открыть интерактивную карту →</a>
-      <a class="map-link" href="/metro/">Схема метро →</a>
-    </p>
+  // Two equal-weight entry points to /map/ and /metro/ (2026-09-07 decision,
+  // "равнозначную ссылке на карту") are now the hero's two CTA buttons
+  // above, not a separate paragraph — still the same two URLs, just no
+  // longer plain text-with-arrow links.
+  function homeCard({ href, iconName, title, desc, count, size }) {
+    return `<a class="home-card home-card--${size}" href="${esc(href)}">
+      <span class="home-card__icon">${icon(iconName, size === "lg" ? 26 : 20)}</span>
+      <span class="home-card__body">
+        <span class="home-card__title">${esc(title)}</span>
+        <span class="home-card__desc">${esc(desc)}</span>
+        <span class="home-card__count">${esc(count)}</span>
+      </span>
+    </a>`;
+  }
+
+  const primaryCards = [
+    homeCard({ href: "/streets/", iconName: "road", title: "Улицы", desc: "Дома и улицы с точным адресом и геопривязкой", count: streetTotal, size: "lg" }),
+    homeCard({ href: "/rubrics/", iconName: "briefcase", title: "Организации по рубрикам", desc: "Компании и учреждения города по категориям", count: `${orgTotal} · ${rubricRows.length} рубрик`, size: "lg" }),
+  ].join("");
+
+  const secondaryCards = [
+    homeCard({ href: "/routes/", iconName: "bus", title: "Маршруты транспорта", desc: "Автобусы, трамваи, троллейбусы и метро", count: routeTotal, size: "sm" }),
+    homeCard({ href: "/stops/", iconName: "flag", title: "Остановки и станции", desc: "Все остановки и станции города на карте", count: stopTotal, size: "sm" }),
+    // 2026-09-15 (районы/нас.пункты/парки волна): the old single "Районы"
+    // card here linked to /districts/ while describing "Административные
+    // районы Столичной общины" — that description was actually WRONG for
+    // what /districts/ is (121 OSM admin_level=9 quarters/housing estates,
+    // not the 24 official raions — see raionsDirectory.js's own top
+    // comment for the two concepts' real difference). Split into two
+    // honest cards instead of quietly fixing the copy on the same card.
+    homeCard({ href: "/raions/", iconName: "hexagon", title: "Официальные районы", desc: "24 административных района Столичной общины", count: raionTotal, size: "sm" }),
+    homeCard({ href: "/districts/", iconName: "grid", title: "Кварталы", desc: "Жилые комплексы и кварталы (OSM)", count: districtTotal, size: "sm" }),
+    homeCard({ href: "/settlements/", iconName: "home", title: "Населённые пункты", desc: "Сёла и посёлки в составе общины", count: settlementTotal, size: "sm" }),
+    homeCard({ href: "/parks/", iconName: "tree", title: "Парки", desc: "Парки, сады, леса и охраняемые территории", count: parkTotal, size: "sm" }),
+    homeCard({ href: "/indexes/", iconName: "mail", title: "Почтовые индексы", desc: "Почтовый индекс каждого дома", count: indexTotal, size: "sm" }),
+  ].join("");
+
+  const sections = `
+    <h2 class="home-sections-title">Разделы справочника</h2>
+    <div class="home-grid-lg">${primaryCards}</div>
+    <div class="home-grid-sm">${secondaryCards}</div>
   `;
 
-  const body = itemList([
-    { href: "/streets/", label: "Улицы", count: streetTotal },
-    { href: "/rubrics/", label: "Организации по рубрикам", count: `${orgTotal} · ${rubricRows.length} рубрик` },
-    { href: "/routes/", label: "Маршруты транспорта", count: routeTotal },
-    { href: "/stops/", label: "Остановки и станции", count: stopTotal },
-    { href: "/districts/", label: "Районы", count: areas.getAll("districts").length },
-    { href: "/settlements/", label: "Населённые пункты", count: areas.getAll("settlements").length },
-    { href: "/indexes/", label: "Почтовые индексы", count: postcodes.get().codes.length },
-  ]);
   res.type("html").send(page({
     title: "Карта Софии — интерактивная карта и справочник домов, улиц, организаций и транспорта",
     h1: "Карта Софии",
-    body: `${seoParagraph}${mapCta}${body}`,
+    body: `${hero}${sections}`,
   }));
 });
 
@@ -159,6 +216,14 @@ function stopsWord(n) {
   if (mod10 === 1 && mod100 !== 11) return "остановка";
   if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) return "остановки";
   return "остановок";
+}
+// Same three-way plural, for "точка" (2026-09-15, stop-cluster entity page
+// — "объединяет N точек посадки").
+function pointsWord(n) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "точка";
+  if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) return "точки";
+  return "точек";
 }
 // One "Остановки рядом" card (§15.2, following a reference screenshot the
 // user supplied 2026-09-06): name/type/distance, then its OWN routes as
@@ -565,19 +630,28 @@ router.get("/streets/:streetSlug/dom-:houseSlug.html", (req, res) => {
     ${postcodeNoteHtml}
     ${collisionHtml}
     ${duplicateNoteHtml}
-    ${mapLink(house.housenumber ? `${entry.name} ${house.housenumber}` : entry.name, "streets")}
+    ${mapSelectLink("address", house.id)}
   `;
   const mainBlock = blockWrap("main", "Основное", "mapPin", mainInner);
 
-  // Live map widget (decision C13) — same address text as the "Открыть на
-  // карте" link above, via the shared mapHref()/`?q=` convention (see
-  // htmlPage.js's miniMapWidget()); needs the house's own point, not the
-  // street cluster's, so it lands on this exact building.
+  // Live map widget (decision C13) — 2026-09-15 live report fix ("при клике
+  // со страницы адреса, на карте должен вызываться необходимый объект.
+  // Сейчас кнопка развернуть, просто открывает большую карту"): this used
+  // to be a plain `?q=`/`type` text re-search (mapHref/miniMapWidget's old
+  // signature) built from the same address text as the link above — which
+  // used to be good enough to resolve back to this exact building, but
+  // isn't anymore now that the map's own search can group/bubble results
+  // (Проблема B's leader+namesakes split) in ways a bare text search can
+  // land on a different row than this specific house. `selType`/`selId`
+  // route it through `/api/object/address/:id` instead (same mechanism
+  // `map-search.js`'s `choose()` already uses for a clicked search-result
+  // row), so "Развернуть" always selects THIS building, not whatever a
+  // fresh text search for its address happens to rank first.
   const mapWidgetHtml = miniMapWidget({
     lat: house.lat,
     lon: house.lon,
-    query: house.housenumber ? `${entry.name} ${house.housenumber}` : entry.name,
-    type: "streets",
+    selType: "address",
+    selId: house.id,
   });
 
   // ---- Как доехать (§12: metro box + surface stops, reference's own
@@ -832,6 +906,21 @@ router.get("/rubrics/:rubricSlug/:companySlug.html", (req, res) => {
   const kpHtml = kakProehatHtml(kakProehat);
   const transportBlock = kpHtml ? `<h2 id="transport">Транспорт рядом</h2>${kpHtml}` : "";
 
+  // 2026-09-15 (Point 2, "адрес вместо организации" migration — see
+  // claude/implementation-log.md and generate_org_migration.js): a handful
+  // of chains (e.g. "Фантастико") were migrated from several addressless
+  // buildings sharing one name, clustered into ONE canonical organization
+  // rather than one flat row per address ("собираем в кластеры", per the
+  // user's explicit instruction) — same "one entity, list its real points"
+  // idea as a multi-platform stop's own page (stopsDirectory.js/pages.js's
+  // `/stops/` route), just for organizations instead of transit stops.
+  const clusterMembers = rubrics.getClusterMembers(company.id);
+  const clusterBlock = clusterMembers.length ? `
+    <h2 id="locations">Другие адреса «${esc(company.name)}»</h2>
+    <p class="meta">Эта сеть встречается в ${clusterMembers.length + 1} местах города — ниже остальные ${clusterMembers.length}.</p>
+    ${itemList(clusterMembers.map((m) => ({ href: null, label: [withDesignation(m.addr_street), m.housenumber].filter(Boolean).join(" ") || "Без указанного адреса", count: null })))}
+  ` : "";
+
   const nearbyBlock = nearbyOrgs.length ? `
     <h2 id="nearby">Рядом</h2>
     ${itemList(nearbyOrgs.map((o) => ({ href: o.href, label: o.name, count: `${o.distanceM} м` })))}
@@ -839,6 +928,7 @@ router.get("/rubrics/:rubricSlug/:companySlug.html", (req, res) => {
 
   const anchors = [{ href: "#main", label: "Основное" }];
   if (transportBlock) anchors.push({ href: "#transport", label: "Транспорт рядом" });
+  if (clusterBlock) anchors.push({ href: "#locations", label: "Другие адреса" });
   if (nearbyBlock) anchors.push({ href: "#nearby", label: "Рядом" });
   const anchorNav = anchors.length > 1 ? `<p class="meta">${anchors.map((a) => `<a href="${a.href}">${esc(a.label)}</a>`).join(" · ")}</p>` : "";
 
@@ -856,6 +946,7 @@ router.get("/rubrics/:rubricSlug/:companySlug.html", (req, res) => {
     ${anchorNav}
     ${mainBlock}
     ${transportBlock}
+    ${clusterBlock}
     ${nearbyBlock}
   `;
   res.type("html").send(page({
@@ -1014,14 +1105,52 @@ router.get("/stops/:type/:stopSlug.html", (req, res) => {
   if (!stops.TYPE_LABELS[type]) return notFound(res, "Тип остановки");
   const stop = stops.getStopBySlug(type, req.params.stopSlug);
   if (!stop) return notFound(res, "Остановка");
-  const routesThrough = stops.getRoutesForStop(stop.id);
+
+  // 2026-09-15 live report ("нужна одна страница по этой сущности... при
+  // выдаче — только одна ссылка на эту страницу"): a multi-platform stop
+  // (same name, physically close — see stopsDirectory.js's
+  // getClusterForStop) now has exactly ONE canonical page, the cluster's
+  // leader. Every OTHER member's own individual page (it still exists —
+  // slugify gave it one, same as before this fix) redirects here instead of
+  // rendering separate, near-duplicate content — the search result's single
+  // link always points straight at the leader already (search.js), but a
+  // sibling's page could still be reached directly (an old bookmark, a
+  // search-engine index, a stale link) and would otherwise show the exact
+  // same info as this page minus the other platforms.
+  const cluster = stops.getClusterForStop(type, stop.id);
+  if (cluster && cluster.members.length > 1 && cluster.leaderId !== stop.id) {
+    const leaderEntry = stops.getStopById(cluster.leaderType, cluster.leaderId);
+    if (leaderEntry) return res.redirect(301, `/stops/${cluster.leaderType}/${leaderEntry.slug}.html`);
+  }
+
+  // Only real once we know THIS page is the leader (or the stop isn't
+  // clustered at all) — siblings above already redirected away.
+  const clusterSiblings = cluster && cluster.members.length > 1 ? cluster.members.slice(1) : [];
+  const routesThrough = clusterSiblings.length
+    ? stops.getRoutesForCluster(cluster.members.map((m) => m.id))
+    : stops.getRoutesForStop(stop.id);
   const nearbyOrgs = orgMatch.findNearbyOrganizations({ lat: stop.lat, lon: stop.lon });
   const infra = rubrics.getNearbyByRubric(stop.lat, stop.lon);
+
+  const mapWidgetHtml = miniMapWidget({
+    lat: stop.lat, lon: stop.lon,
+    selType: "stop", selId: stop.id,
+    points: clusterSiblings.map((m) => ({ lat: m.lat, lon: m.lon })),
+  });
+
+  // "Пояснение напиши логичное" (2026-09-15): say plainly WHY this one page
+  // speaks for several physical points instead of hiding the fact — same
+  // "explain the quirk" stance streetsDirectory's namesake note already
+  // takes for same-named streets.
+  const clusterNote = clusterSiblings.length
+    ? `<p>Эта остановка объединяет ${cluster.members.length} ${pointsWord(cluster.members.length)} посадки одного места (разные платформы или стороны улицы) — все показаны на карте ниже, и маршруты ниже относятся ко всем точкам вместе.</p>`
+    : "";
 
   const mainBlock = `
     <h2 id="main">Основное</h2>
     <p class="meta">${esc(stops.TYPE_LABELS[type])}${stop.network ? ` · ${esc(stop.network)}` : ""}</p>
-    ${mapLink(stop.name, "stops")}
+    ${clusterNote}
+    ${mapWidgetHtml || mapLink(stop.name, "stops")}
   `;
 
   const routesBlock = `
@@ -1062,14 +1191,85 @@ router.get("/stops/:type/:stopSlug.html", (req, res) => {
     h1: stop.name,
     breadcrumbs: [HOME, { label: "Остановки", href: "/stops/" }, { label: stops.TYPE_LABELS[type], href: `/stops/${type}/` }, { label: stop.name }],
     body,
+    headExtra: mapWidgetHtml ? mapAssetsHead() : "",
+    scripts: mapWidgetHtml ? mapAssetsScripts() : "",
   }));
 });
 
-// -------------------------------------------------------- /districts/ /settlements/
+// -------------------------------------------- /districts/ /settlements/ /raions/ /parks/
+// 2026-09-15 ("Создание страниц по районам, населённым пунктам, паркам" +
+// "ветка группы страниц по паркам" — see
+// claude/next-steps-district-settlement-park-pages.md for the full
+// diagnosis this wave started from): these four sections were the
+// deliberately shallowest branches from wave 1 (districts/settlements: a
+// bare name + one "Открыть на карте" link, no real content) plus one that
+// didn't exist at all (raions/parks). Two decisions the user made before
+// this wave started shape everything below:
+//
+//   1. "Оба раздела отдельно" — districts (121 OSM admin_level=9 quarters/
+//      housing estates) and raions (24 official Stolichna Community
+//      administrative raions) are kept as two SEPARATE sections with
+//      different URLs, each explaining on its own pages what it is and
+//      isn't (raionsDirectory.js's own top comment has the full
+//      district-vs-raion distinction). Settlements stay their own third,
+//      unrelated concept, same as before.
+//   2. Parks tag scope: leisure=park + leisure=garden + landuse=forest +
+//      boundary=protected_area — wider than the map's own `landuse` layer
+//      (see pipeline/export_parks.py's own comment on why that means a
+//      few of these won't be labelled on the live map itself today).
+//
+// All four detail-page kinds share the same underlying shape (a name, one
+// point, one boundary polygon) — `areaEnrichmentBlocks()` below is the one
+// shared "what's inside/near this polygon" builder every one of them calls,
+// rather than four near-identical copies of the same three lookups.
+function areaEnrichmentBlocks(geometry, { lat, lon }) {
+  let orgsBlock = "";
+  let streetsBlock = "";
+  if (geometry) {
+    const orgsResult = orgMatch.findOrganizationsInPolygon(geometry);
+    if (orgsResult.total) {
+      const inner = itemList(orgsResult.items.map((o) => ({ href: o.href, label: o.name, count: o.rubric || null })));
+      const truncNote = orgsResult.total > orgsResult.items.length
+        ? `<p class="meta">Показаны первые ${orgsResult.items.length} из ${orgsResult.total} — остальные ищите по <a href="/rubrics/">рубрикам</a> или на карте.</p>`
+        : "";
+      orgsBlock = blockWrap("orgs", `Организации (${orgsResult.total})`, "briefcase", `${inner}${truncNote}`);
+    }
+
+    const streetEntries = streets.findStreetsInPolygon(geometry);
+    if (streetEntries.length) {
+      const inner = itemList(streetEntries.map((e) => ({ href: `/streets/${e.slug}.html`, label: e.displayName || e.name, count: null })));
+      streetsBlock = blockWrap("streets", `Улицы (${streetEntries.length})`, "road", inner);
+    }
+  }
+
+  // Centroid-based, not "everywhere in this polygon" — honestly labelled
+  // below as "рядом с центром" rather than implying whole-area transit
+  // coverage a single nearest-stop lookup can't actually answer for
+  // something the size of a district/raion (same reasoning object.js's own
+  // top comment gives for why the map's district/settlement info card
+  // skips this entirely — the page version here gets to be explicit about
+  // the approximation in a way a small map popup can't).
+  let transportBlock = "";
+  if (lat != null && lon != null) {
+    const kpHtml = kakProehatHtml(transportNearby.getKakProehat(lat, lon));
+    if (kpHtml) transportBlock = blockWrap("transport", "Транспорт рядом с центром", "bus", kpHtml);
+  }
+
+  return { orgsBlock, streetsBlock, transportBlock };
+}
+
 function areasHub(kind, title) {
   return (req, res) => {
     const items = areas.getAll(kind);
-    const body = itemList(items.map((d) => ({ href: `/${kind}/${d.slug}.html`, label: d.name, count: null })));
+    // "Кварталы" (OSM districts) is the one of these four sections most
+    // likely to be confused with "Официальные районы" (raions) — an
+    // explicit note here, not just on the detail page, since a visitor
+    // browsing THIS list is exactly who might expect to find e.g.
+    // "Лозенец" as a raion name among these 121 quarter names instead.
+    const note = kind === "districts"
+      ? `<p class="meta">Кварталы и жилые комплексы по данным OpenStreetMap — не официальные административные районы Столичной общины. Официальные районы (24) — в разделе <a href="/raions/">«Официальные районы»</a>.</p>`
+      : "";
+    const body = note + itemList(items.map((d) => ({ href: `/${kind}/${d.slug}.html`, label: d.name, count: null })));
     res.type("html").send(page({
       title: `${title} — Карта Софии`,
       h1: title,
@@ -1082,19 +1282,195 @@ function areaDetail(kind, title) {
   return (req, res) => {
     const item = areas.getBySlug(kind, req.params.slug);
     if (!item) return notFound(res, title);
-    const body = mapLink(item.name, kind === "districts" ? "areas" : "cities");
+
+    const mapWidgetHtml = miniMapWidget({ lat: item.lat, lon: item.lon, selType: kind === "districts" ? "district" : "settlement", selId: item.id });
+
+    const kindNote = kind === "districts"
+      ? `<p class="meta">Квартал / жилой комплекс (OSM) — не официальный административный район. См. также <a href="/raions/">официальные районы</a>.</p>`
+      : "";
+    // Cross-link to the official raion this point falls in (raionsDirectory
+    // already had findRaion() for the house-page admin/police lookup —
+    // reused verbatim here, not re-derived) — works for both kinds:
+    // districts sit inside a raion by construction, and 3 of the 40
+    // settlements (Банкя, Нови Искър, Панчарево) are themselves also raions
+    // (raionsDirectory.js's own comment on the 3-way overlap).
+    const raion = item.lat != null && item.lon != null ? raions.findRaion(item.lat, item.lon) : null;
+    const raionNote = raion ? `<p class="meta">Официальный район: <a href="/raions/${raion.slug}.html">${esc(raion.name)}</a></p>` : "";
+
+    const { orgsBlock, streetsBlock, transportBlock } = areaEnrichmentBlocks(item.geometry, { lat: item.lat, lon: item.lon });
+
+    const body = `
+      ${kindNote}
+      ${mapWidgetHtml}
+      ${raionNote}
+      ${streetsBlock}
+      ${orgsBlock}
+      ${transportBlock}
+    `;
     res.type("html").send(page({
       title: `${item.name} — ${title}`,
       h1: item.name,
       breadcrumbs: [HOME, { label: title, href: `/${kind}/` }, { label: item.name }],
       body,
+      headExtra: mapWidgetHtml ? mapAssetsHead() : "",
+      scripts: mapWidgetHtml ? mapAssetsScripts() : "",
     }));
   };
 }
-router.get("/districts/", areasHub("districts", "Районы"));
-router.get("/districts/:slug.html", areaDetail("districts", "Районы"));
+router.get("/districts/", areasHub("districts", "Кварталы"));
+router.get("/districts/:slug.html", areaDetail("districts", "Кварталы"));
 router.get("/settlements/", areasHub("settlements", "Населённые пункты"));
 router.get("/settlements/:slug.html", areaDetail("settlements", "Населённые пункты"));
+
+// ---------------------------------------------------------------- /raions/
+// The 24 OFFICIAL Stolichna Community administrative raions — had no
+// public page/URL at all before this wave (raionsDirectory.js already
+// existed, but only ever as an internal lookup for the house page's
+// admin/police contact blocks — see that module's own top comment). Small
+// enough (24) for the same flat single-page list the districts/settlements
+// hubs already use — no letter index needed at this scale.
+router.get("/raions/", (req, res) => {
+  const items = raions.getAll();
+  const note = `<p class="meta">24 официальных административных района Столичной общины — не то же самое, что <a href="/districts/">кварталы и жилые комплексы (OSM)</a>, хотя названия иногда похожи.</p>`;
+  const body = note + itemList(items.map((r) => ({ href: `/raions/${r.slug}.html`, label: r.name, count: null })));
+  res.type("html").send(page({
+    title: "Официальные районы — Карта Софии",
+    h1: "Официальные районы",
+    breadcrumbs: [HOME, { label: "Официальные районы" }],
+    body,
+  }));
+});
+router.get("/raions/:slug.html", (req, res) => {
+  const item = raions.getBySlug(req.params.slug);
+  if (!item) return notFound(res, "Район");
+
+  const mapWidgetHtml = miniMapWidget({ lat: item.lat, lon: item.lon, selType: "raion", selId: item.id });
+
+  // Same contact tables the house page already draws on for "this house's
+  // raion admin/police" (districtAdminContacts.js/policeContacts.js,
+  // house-page-template.md §13.6/§13.11) — shown here as the raion's OWN
+  // page content instead of a house's cross-reference to it.
+  const adminContact = districtAdmin.getByRaionName(item.name);
+  const policeContact = police.getByRaionName(item.name);
+  let adminBlock = "";
+  if (adminContact || policeContact) {
+    const inner = `
+      ${adminContact ? `<p>Районна администрация «${esc(item.name)}»: ${esc(adminContact.address)} (кмет: ${esc(adminContact.mayor)})</p>` : ""}
+      ${policeContact ? `<p>${esc(policeContact.num)} РУ СДВР: ${esc(policeContact.address)}, тел. ${esc(policeContact.phone)}</p>` : ""}
+    `;
+    adminBlock = blockWrap("admin", "Администрация и полиция", "shield", inner);
+  }
+
+  // Reverse cross-links (cheap: 121 districts / 147 parks, one
+  // pointInGeometry test each against this one raion polygon) — "which OSM
+  // quarters/parks actually sit inside this official raion", the flip side
+  // of the district/park pages' own "which raion am I in" note above/below.
+  const containedDistricts = item.geometry ? areas.getAll("districts").filter((d) => d.geometry && pointInGeometry(d.lon, d.lat, item.geometry)) : [];
+  const districtsBlock = containedDistricts.length
+    ? blockWrap("districts", `Кварталы в этом районе (${containedDistricts.length})`, "grid", itemList(containedDistricts.map((d) => ({ href: `/districts/${d.slug}.html`, label: d.name, count: null }))))
+    : "";
+  const containedParks = item.geometry ? parks.getAll().filter((p) => pointInGeometry(p.lon, p.lat, item.geometry)) : [];
+  const parksBlock = containedParks.length
+    ? blockWrap("parks", `Парки в этом районе (${containedParks.length})`, "tree", itemList(containedParks.map((p) => ({ href: `/parks/${p.slug}.html`, label: p.name, count: p.typeLabel }))))
+    : "";
+
+  const { orgsBlock, streetsBlock, transportBlock } = areaEnrichmentBlocks(item.geometry, { lat: item.lat, lon: item.lon });
+
+  const body = `
+    <p class="meta">Официальный административный район Столичной общины.</p>
+    ${mapWidgetHtml}
+    ${adminBlock}
+    ${districtsBlock}
+    ${parksBlock}
+    ${streetsBlock}
+    ${orgsBlock}
+    ${transportBlock}
+  `;
+  res.type("html").send(page({
+    title: `${item.name} — Официальные районы — Карта Софии`,
+    h1: item.name,
+    breadcrumbs: [HOME, { label: "Официальные районы", href: "/raions/" }, { label: item.name }],
+    body,
+    headExtra: mapWidgetHtml ? mapAssetsHead() : "",
+    scripts: mapWidgetHtml ? mapAssetsScripts() : "",
+  }));
+});
+
+// ----------------------------------------------------------------- /parks/
+// New branch (pipeline/export_parks.py — see that file's own comment for
+// where the underlying geometry/names actually come from and why this
+// didn't need any new external data acquisition). Flat alphabetical list
+// (user's choice, 2026-09-15) — 147 named entries after dedup/unnamed
+// filtering is well within the range the districts/settlements/raions hubs
+// already handle as one flat page, no letter index needed.
+router.get("/parks/", (req, res) => {
+  const items = parks.getAll();
+  const note = `<p class="meta">Парки, сады, городские леса и охраняемые территории по данным OpenStreetMap — только именованные объекты; список не претендует на полноту.</p>`;
+  const body = note + itemList(items.map((p) => ({ href: `/parks/${p.slug}.html`, label: p.name, count: p.typeLabel })));
+  res.type("html").send(page({
+    title: "Парки — Карта Софии",
+    h1: "Парки",
+    breadcrumbs: [HOME, { label: "Парки" }],
+    body,
+  }));
+});
+router.get("/parks/:slug.html", (req, res) => {
+  const item = parks.getBySlug(req.params.slug);
+  if (!item) return notFound(res, "Парк");
+
+  const mapWidgetHtml = miniMapWidget({ lat: item.lat, lon: item.lon, selType: "park", selId: item.id });
+
+  // "Where is this" cross-links — same findContaining()/findRaion() the
+  // district/settlement/raion pages use for their own reverse direction,
+  // just read here off the park's own centroid instead of a house's exact
+  // point (see areasDirectory.js's own comment on why a `null` result from
+  // findContaining is expected/normal, not a bug).
+  const containingArea = areas.findContaining(item.lat, item.lon);
+  const raion = raions.findRaion(item.lat, item.lon);
+  const locationBits = [
+    raion ? `официальный район <a href="/raions/${raion.slug}.html">${esc(raion.name)}</a>` : null,
+    containingArea ? `${containingArea.kind === "districts" ? "квартал" : "населённый пункт"} <a href="/${containingArea.kind}/${containingArea.slug}.html">${esc(containingArea.name)}</a>` : null,
+  ].filter(Boolean);
+  const locationNote = locationBits.length ? `<p class="meta">${esc(item.typeLabel)} · ${locationBits.join(" · ")}</p>` : `<p class="meta">${esc(item.typeLabel)}</p>`;
+
+  // Two different questions, both worth answering (see this route file's
+  // top-level areaEnrichmentBlocks() for the polygon-containment approach
+  // this borrows): what's literally ON the park's own territory (kiosks,
+  // sports facilities mapped inside its boundary) vs. what's around it
+  // (cafes/shops near an entrance) — a fixed 300m radius, same default
+  // orgMatch.findNearbyOrganizations() already uses elsewhere on this site.
+  let insideBlock = "";
+  if (item.geometry) {
+    const inside = orgMatch.findOrganizationsInPolygon(item.geometry);
+    if (inside.total) {
+      const truncNote = inside.total > inside.items.length ? `<p class="meta">Показаны первые ${inside.items.length} из ${inside.total}.</p>` : "";
+      insideBlock = blockWrap("orgs-inside", `На территории (${inside.total})`, "briefcase", `${itemList(inside.items.map((o) => ({ href: o.href, label: o.name, count: o.rubric || null })))}${truncNote}`);
+    }
+  }
+  const nearby = orgMatch.findNearbyOrganizations({ lat: item.lat, lon: item.lon, radiusM: 300 });
+  const nearbyBlock = nearby.length
+    ? blockWrap("orgs-nearby", `Рядом (${nearby.length})`, "mapPin", itemList(nearby.map((o) => ({ href: o.href, label: o.name, count: [o.rubric, `${o.distanceM} м`].filter(Boolean).join(" · ") }))))
+    : "";
+
+  const kpHtml = kakProehatHtml(transportNearby.getKakProehat(item.lat, item.lon));
+  const transportBlock = kpHtml ? blockWrap("transport", "Как доехать", "bus", kpHtml) : "";
+
+  const body = `
+    ${locationNote}
+    ${mapWidgetHtml}
+    ${insideBlock}
+    ${nearbyBlock}
+    ${transportBlock}
+  `;
+  res.type("html").send(page({
+    title: `${item.name} — Парки — Карта Софии`,
+    h1: item.name,
+    breadcrumbs: [HOME, { label: "Парки", href: "/parks/" }, { label: item.name }],
+    body,
+    headExtra: mapWidgetHtml ? mapAssetsHead() : "",
+    scripts: mapWidgetHtml ? mapAssetsScripts() : "",
+  }));
+});
 
 // -------------------------------------------------------------- /indexes/
 // Собственная ветка по почтовым индексам (Находка №11): главная → группа

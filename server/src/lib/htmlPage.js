@@ -31,8 +31,10 @@ const NAV_ITEMS = [
   { label: "Организации", href: "/rubrics/" },
   { label: "Маршруты", href: "/routes/" },
   { label: "Остановки", href: "/stops/" },
-  { label: "Районы", href: "/districts/" },
+  { label: "Официальные районы", href: "/raions/" },
+  { label: "Кварталы", href: "/districts/" },
   { label: "Населённые пункты", href: "/settlements/" },
+  { label: "Парки", href: "/parks/" },
   { label: "Индексы", href: "/indexes/" },
   { label: "Карта", href: "/map/" },
   { label: "Схема метро", href: "/metro/" },
@@ -52,8 +54,10 @@ const SECTION_LABEL_TO_NAV_HREF = {
   "Организации": "/rubrics/",
   "Маршруты": "/routes/",
   "Остановки": "/stops/",
-  "Районы": "/districts/",
+  "Официальные районы": "/raions/",
+  "Кварталы": "/districts/",
   "Населённые пункты": "/settlements/",
+  "Парки": "/parks/",
   "Почтовые индексы": "/indexes/",
 };
 
@@ -195,6 +199,59 @@ const STYLE = `
   .mini-map-widget .mini-map-foot { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; font-size: 0.88em; }
   .mini-map-widget .mini-map-expand { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; }
   .mini-map .maplibregl-ctrl { display: none; } /* preview map: no controls, tap → expand */
+
+  /* ---------------------------------------------------------- home page
+     Hero (lead text + stat numbers + two primary CTA buttons) and the
+     section-card grid that replace the old flat itemList() of 7 equal
+     rows (2026-09-15 redesign — "сейчас она очень слаба и скучна", see
+     claude/next-steps-homepage-design.md). No map preview here by
+     decision — mini-map.js's widget is built for one street-level point
+     (fixed zoom 15.5, non-interactive), not a city overview, so a live
+     MapLibre instance would be unwarranted weight on the crawlable entry
+     page; plain accent-styled buttons instead. Streets/Organizations get
+     the --lg card treatment (most content, most likely entry points);
+     the rest are --sm but keep the same icon+title+description+count
+     shape (every card gets a one-line description, not just the big
+     two). */
+  .home-hero { background: linear-gradient(135deg, var(--accent-tint), var(--surface) 65%); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 28px 30px 26px; margin: 0 0 26px; box-shadow: var(--shadow-sm); }
+  .home-hero__lead { font-size: 1.08em; color: var(--ink-soft); margin: 0 0 20px; max-width: 640px; }
+  .home-stats { display: flex; flex-wrap: wrap; gap: 26px; list-style: none; margin: 0 0 22px; padding: 0; }
+  .home-stats li { display: flex; flex-direction: column; gap: 1px; }
+  .home-stats strong { font-family: var(--font-head), system-ui, sans-serif; font-size: 1.5em; font-weight: 800; color: var(--ink); line-height: 1.1; }
+  .home-stats span { font-size: 0.82em; color: var(--muted); }
+  .home-hero__actions { display: flex; flex-wrap: wrap; gap: 12px; }
+  /* Compound .home-cta.home-cta--primary selectors (not two separate
+     rules) deliberately, not just style — the body.framed a { color } rule
+     above outranks a single-class selector on specificity (2 elements
+     beat a 1-class/1-class tie), which silently made this button's own
+     color:#fff lose to the global accent-colored-link rule: same hex as
+     the button's own background, so the label was invisible (caught
+     visually in a rendered screenshot, not by reading the CSS). */
+  .home-cta { display: inline-flex; align-items: center; gap: 8px; padding: 13px 22px; border-radius: var(--r-md); font-weight: 700; font-size: 0.95em; text-decoration: none; }
+  .home-cta.home-cta--primary { background: var(--accent); color: #fff; box-shadow: var(--shadow-sm); }
+  .home-cta.home-cta--primary:hover { background: var(--accent-hover); }
+  .home-cta.home-cta--secondary { background: var(--surface); color: var(--accent); border: 1.5px solid var(--accent); }
+  .home-cta.home-cta--secondary:hover { background: var(--accent-tint); }
+  .home-sections-title { font-size: 1.15em; font-weight: 800; margin: 0 0 14px; }
+  .home-grid-lg { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin: 0 0 16px; }
+  .home-grid-sm { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 0 0 20px; }
+  .home-card { display: flex; gap: 14px; align-items: flex-start; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 18px 20px; text-decoration: none; color: inherit; box-shadow: var(--shadow-sm); transition: border-color 0.15s ease; }
+  .home-card:hover { border-color: var(--accent); }
+  .home-card__icon { border-radius: var(--r-md); background: var(--accent-tint); color: var(--accent); display: flex; align-items: center; justify-content: center; flex: none; }
+  .home-card__body { display: flex; flex-direction: column; min-width: 0; }
+  .home-card__title { font-family: var(--font-head), system-ui, sans-serif; font-weight: 800; color: var(--ink); margin-bottom: 2px; }
+  .home-card__desc { color: var(--ink-soft); font-size: 0.86em; margin-bottom: 10px; }
+  .home-card__count { display: inline-flex; align-self: flex-start; padding: 3px 11px; border-radius: var(--r-pill); background: var(--accent-tint); color: var(--accent); font-weight: 700; font-size: 0.82em; white-space: nowrap; }
+  .home-card--lg { padding: 24px 26px; }
+  .home-card--lg .home-card__icon { width: 54px; height: 54px; }
+  .home-card--lg .home-card__title { font-size: 1.22em; }
+  .home-card--sm .home-card__icon { width: 38px; height: 38px; }
+  .home-card--sm .home-card__title { font-size: 1em; }
+  @media (max-width: 640px) {
+    .home-hero { padding: 22px 20px; }
+    .home-grid-lg { grid-template-columns: 1fr; }
+    .home-cta { flex: 1 1 auto; justify-content: center; }
+  }
 
   /* -------------------------------------------------------------- chrome
      Bare pages (frame: false, e.g. /metro/) never emit any of the markup
@@ -382,11 +439,44 @@ ${innerHtml}
 // teaching /map/ a new lat/lon URL param — the address text is already
 // specific enough to resolve to this exact building via the map's existing
 // search (same convention already used at ~15 other call sites).
-function miniMapWidget({ lat, lon, query, type }) {
+// 2026-09-15 (live report: "при клике со страницы адреса, на карте должен
+// вызываться необходимый объект. Сейчас кнопка развернуть, просто открывает
+// большую карту"): `?q=`/`type` was never a reliable way to land on THIS
+// exact object once the map's own search can bubble/group things (Проблема
+// B's leader+namesakes split, "Витоша" etc.) — a text re-search from the
+// mini-map can now resolve to a different row than the one the widget was
+// actually showing. `selType`/`selId` on `miniMapWidget()` below take
+// priority when given: they build a `?sel=type:id` link instead, resolved
+// map-side (web/js/map-search.js's `selectFromUrl`) via the SAME
+// `/api/object/:type/:id` endpoint the map already uses when a search
+// result row is clicked — so "Развернуть" ends up doing exactly what
+// clicking that object in search results does, not a fresh text search.
+// Kept as an addition, not a replacement of `mapHref`/`type`: every other
+// call site of `miniMapWidget()`/`mapLink()` (~15 across pages.js) still
+// only has a query string to offer, and stays on the old behavior.
+function mapSelectHref(type, id) {
+  return `/map/?sel=${encodeURIComponent(type)}:${encodeURIComponent(id)}`;
+}
+
+function mapSelectLink(type, id, label = "Открыть на карте →") {
+  return `<a class="map-link" href="${esc(mapSelectHref(type, id))}">${esc(label)}</a>`;
+}
+
+// `points` (2026-09-15, stop-cluster entity page): optional extra
+// [{lat, lon}, ...] markers besides the primary one — a multi-platform
+// stop's own page needs to show EVERY physical point of the cluster on one
+// map, not just the single point this call is centered on. Serialized as a
+// `data-points` JSON attribute; mini-map.js draws the primary marker as
+// before and a smaller one for each extra point, then fits the view to all
+// of them instead of a fixed center/zoom. Omitted entirely (no attribute)
+// when there's nothing extra — every existing single-point caller
+// (addresses, districts, ...) is completely unaffected.
+function miniMapWidget({ lat, lon, query, type, selType, selId, points }) {
   if (lat == null || lon == null) return "";
-  const expandHref = mapHref(query, type);
+  const expandHref = selType && selId != null ? mapSelectHref(selType, selId) : mapHref(query, type);
+  const pointsAttr = points && points.length ? ` data-points="${esc(JSON.stringify(points))}"` : "";
   return `<div class="mini-map-widget">
-<div class="mini-map" data-lat="${esc(lat)}" data-lon="${esc(lon)}" data-expand="${esc(expandHref)}" role="img" aria-label="Карта расположения"></div>
+<div class="mini-map" data-lat="${esc(lat)}" data-lon="${esc(lon)}" data-expand="${esc(expandHref)}"${pointsAttr} role="img" aria-label="Карта расположения"></div>
 <div class="mini-map-foot"><span class="meta" style="margin:0">Показано на карте Софии</span><a class="mini-map-expand" href="${esc(expandHref)}">Развернуть ${icon("externalLink", 14)}</a></div>
 </div>`;
 }
@@ -492,4 +582,4 @@ function mapLink(query, type) {
   return `<a class="map-link" href="${esc(mapHref(query, type))}">Открыть на карте →</a>`;
 }
 
-module.exports = { esc, page, itemList, letterNav, mapLink, mapHref, crumbs, blockWrap, miniMapWidget, mapAssetsHead, mapAssetsScripts, adSlotHtml };
+module.exports = { esc, page, itemList, letterNav, mapLink, mapHref, mapSelectLink, mapSelectHref, crumbs, blockWrap, miniMapWidget, mapAssetsHead, mapAssetsScripts, adSlotHtml };

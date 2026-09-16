@@ -15,7 +15,7 @@
 // still the live administrative division.
 const fs = require("fs");
 const path = require("path");
-const { pointInGeometry } = require("./geo");
+const { pointInGeometry, polygonCentroid } = require("./geo");
 const { createSlugAssigner } = require("./slugify");
 
 const DATA_DIR = path.resolve(__dirname, "..", "..", "..", "data");
@@ -43,12 +43,21 @@ function getAll() {
     const assign = createSlugAssigner();
     items = (geojson.features || []).map((f) => {
       const name = titleCase(f.properties.obns_cyr || "");
+      // No precomputed centroid ships in this source file (unlike
+      // districts/settlements, which get theirs from shapely at
+      // parse_full.py's OSM-parsing time) — computed here instead, once,
+      // at first load. Used only for "where to put the marker/where to
+      // center the map" (miniMapWidget, /api/object/raion/:id) — never for
+      // containment, which stays on the exact polygon via pointInGeometry.
+      const c = polygonCentroid(f.geometry);
       return {
         id: f.properties.id,
         num: f.properties.obns_num,
         name,
         nameLat: f.properties.obns_lat,
         geometry: f.geometry,
+        lat: c ? c.lat : null,
+        lon: c ? c.lon : null,
         slug: assign(name, `raion-${f.properties.id}`),
       };
     });
@@ -76,4 +85,13 @@ function getBySlug(slug) {
   return getAll().find((r) => r.slug === slug) || null;
 }
 
-module.exports = { getAll, findRaion, getBySlug };
+// 2026-09-15 (/raions/:slug.html + /api/object/raion/:id — new public
+// section, house-page-template's internal findRaion()/getByRaionName()
+// lookups above never needed this): id here is the source GeoJSON's own
+// `obns_num`-derived `properties.id`, not a sofia.db autoincrement — same
+// "look it up in the in-memory list, don't guess" approach as getBySlug().
+function getById(id) {
+  return getAll().find((r) => String(r.id) === String(id)) || null;
+}
+
+module.exports = { getAll, findRaion, getBySlug, getById };

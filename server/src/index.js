@@ -5,6 +5,8 @@ const searchRoutes = require("./routes/search");
 const rubricRoutes = require("./routes/rubric");
 const objectRoutes = require("./routes/object");
 const coordRoutes = require("./routes/coord");
+const routingRoutes = require("./routes/routing");
+const isochroneRoutes = require("./routes/isochrone");
 const pagesRoutes = require("./routes/pages");
 
 // 2026-09-14 (Meilisearch migration, search-results-plan.md §12-§13): /api/search
@@ -31,6 +33,15 @@ app.use("/api", searchRoutes);
 app.use("/api", rubricRoutes);
 app.use("/api", objectRoutes);
 app.use("/api", coordRoutes);
+// "Как доехать/как дойти" (claude/next-steps-routing.md) -- proxies to a
+// separately-run Motis process (MOTIS_URL env var, defaults to
+// http://127.0.0.1:8081) rather than calculating anything itself.
+app.use("/api", routingRoutes);
+// "Зона доступности" (claude/next-steps-walkability-isochrone.md) --
+// proxies to a separately-run pyvalhalla-based process (VALHALLA_URL env
+// var, defaults to http://127.0.0.1:8082), same satellite-process pattern
+// as routingRoutes above.
+app.use("/api", isochroneRoutes);
 
 // Static, crawlable directory section — now including "/" itself as the
 // site's landing/hub page (2026-09-07: "/" used to be the bare SPA below;

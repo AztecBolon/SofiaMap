@@ -31,7 +31,7 @@
 //      as "по этому адресу": this tier is a real guess, not a resolved
 //      address, and saying otherwise would fabricate precision tiers 1-2
 //      actually have.
-const { pointInGeometry, distanceMeters } = require("./geo");
+const { pointInGeometry, distanceMeters, bboxOfGeometry } = require("./geo");
 const { splitDesignation } = require("./streetDesignation");
 const rubrics = require("./rubricsDirectory");
 // In-memory grid index (orgSpatialIndex.js) instead of a per-call SQL
@@ -158,7 +158,40 @@ function findNearbyOrganizations({ lat, lon, radiusM = DEFAULT_NEARBY_M, limit =
   });
 }
 
+// 2026-09-15 (district/raion/settlement/park pages): "which organizations
+// sit inside this polygon" — a different question from every tier above,
+// which all anchor to ONE building or ONE point. Exact containment
+// (pointInGeometry), not a distance radius — a polygon this size makes
+// "nearby" meaningless, but "inside" is a real geometric fact, same
+// standing as tier-2 above. Reuses the exact pattern areasDirectory.js's
+// own findContaining() already established (bbox pre-filter via
+// orgIndex.queryBox, then an exact per-point test) — just the other
+// direction: findContaining() asks "which polygon contains this point",
+// this asks "which points does this ONE polygon contain".
+//
+// `limit` caps what's actually rendered inline on a page that could
+// otherwise have to list a whole district's worth of organizations (a busy
+// central district can hold several hundred) — `total` always reflects
+// the real count so the page can say "показаны N из M" honestly instead of
+// silently truncating.
+const DEFAULT_POLYGON_LIMIT = 60;
+function findOrganizationsInPolygon(geometry, { limit = DEFAULT_POLYGON_LIMIT } = {}) {
+  const bbox = bboxOfGeometry(geometry);
+  if (!bbox) return { items: [], total: 0 };
+  const candidates = orgIndex.queryBox(bbox.minLat, bbox.maxLat, bbox.minLon, bbox.maxLon);
+  const matched = [];
+  for (const org of candidates) {
+    if (pointInGeometry(org.lon, org.lat, geometry)) matched.push(org);
+  }
+  matched.sort((a, b) => a.name.localeCompare(b.name, "bg"));
+  const items = matched.slice(0, limit).map((org) => {
+    const link = rubrics.getCompanyLink(org.rubric, org.id);
+    return { id: org.id, name: org.name, rubric: org.rubric, href: link ? link.href : null };
+  });
+  return { items, total: matched.length };
+}
+
 module.exports = {
-  findOrganizationsForBuilding, findOrganizationsForStreet, findNearbyOrganizations,
-  ORG_NEARBY_MAX_M, DEFAULT_NEARBY_M, DEFAULT_NEARBY_LIMIT,
+  findOrganizationsForBuilding, findOrganizationsForStreet, findNearbyOrganizations, findOrganizationsInPolygon,
+  ORG_NEARBY_MAX_M, DEFAULT_NEARBY_M, DEFAULT_NEARBY_LIMIT, DEFAULT_POLYGON_LIMIT,
 };

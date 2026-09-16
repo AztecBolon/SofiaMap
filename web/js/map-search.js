@@ -10,14 +10,43 @@
   };
   const TYPE_LABEL = {
     address: "Адрес / дом", street: "Улица", district: "Район", settlement: "Населённый пункт",
+    // 2026-09-15 (/raions/, /parks/ — new public sections): "raion" is the
+    // official Stolichna Community administrative division (24 of them —
+    // see raionsDirectory.js), deliberately distinct from "district"
+    // above (121 OSM admin_level=9 quarters/housing estates) — same two
+    // different real-world concepts the site's own hub pages now explain
+    // side by side, not a renaming of the existing type.
+    raion: "Официальный район", park: "Парк / зелёная зона",
     metro: "Станция метро", stop: "Остановка", rail: "Ж/д платформа", terminal: "Автовокзал / аэропорт",
     route: "Маршрут транспорта", rubric: "Рубрика организаций", company: "Организация",
   };
   const TYPE_GROUP = {
-    address: "place", street: "place", district: "place", settlement: "place",
+    address: "place", street: "place", district: "place", settlement: "place", raion: "place", park: "place",
     metro: "transport", stop: "transport", rail: "transport", terminal: "transport", route: "transport",
     rubric: "org", company: "org",
   };
+  // 2026-09-16 (live report, screenshots of a park/metro/address/street click
+  // each landing on a different card shape — "делай по единому стандарту,
+  // всю информацию в карточке слева"): the wording for the object card's
+  // "Подробнее о …" link (see renderSelected/moreLinkText below) — every
+  // click path now ends up on the SAME card, so this is the one place that
+  // decides how each type's link reads, instead of a single generic
+  // "Открыть страницу" that didn't say what kind of thing it was more info
+  // about. Deliberately keyed on `item.type`, not TYPE_LABEL's own strings
+  // (which are nouns fit for a results-list subtitle, not this phrase's
+  // grammar — e.g. TYPE_LABEL.raion is "Официальный район", but the link
+  // reads "Подробнее о районе «X»", not "...об официальном районе...").
+  const MORE_LINK_PREFIX = {
+    address: "Подробнее об адресе", street: "Подробнее об улице",
+    district: "Подробнее о квартале", raion: "Подробнее о районе",
+    settlement: "Подробнее о населённом пункте", park: "Подробнее о парке",
+    company: "Подробнее об организации", stop: "Подробнее об остановке",
+    metro: "Подробнее о станции метро", rail: "Подробнее о платформе",
+  };
+  function moreLinkText(item) {
+    const prefix = MORE_LINK_PREFIX[item.type] || "Подробнее";
+    return `${prefix} «${item.name}»`;
+  }
   const ICONS = {
     place: '<svg viewBox="0 0 16 16"><path d="M8 1c-2.8 0-5 2.2-5 5 0 3.6 5 9 5 9s5-5.4 5-9c0-2.8-2.2-5-5-5zm0 7a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/></svg>',
     transport: '<svg viewBox="0 0 16 16"><path d="M2 4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4zm1.5 8L2 14v.5h2l1-1.5h6l1 1.5h2V14l-1.5-2h-9zM4 5h8v4H4V5z"/></svg>',
@@ -62,15 +91,49 @@
 
   let typeFilter = "all";
   let results = [];
-  let mode = "listing"; // listing | object | rubric | rubric-company | street-houses | street-house | route-stub
+  let mode = "listing"; // listing | object | rubric | rubric-company | street-houses | street-house | route
   let rubricItems = [];
   let rubricMeta = null;
   let streetHouseItems = [];
   let streetHouseMeta = null;
+  // 2026-09-15 live report, point 2 ("из этого списка нет возможности
+  // перейти на страницу объекта"): the "К результатам"/back button inside
+  // the object card (renderSelected) always went back to the plain search
+  // results, even when the card was opened from a nested browsing list
+  // (a street's houses, a rubric's companies) rather than from the results
+  // list itself — there was no way to express "go back to THAT list" at
+  // all. When set, returnToResults() calls this instead of its default
+  // "back to search results" behaviour, then clears it (one-shot, so a
+  // later unrelated card open — e.g. a plain map click — isn't accidentally
+  // routed back into a stale list). renderSelected() resets it to null on
+  // every open; a caller that wants custom back behaviour sets it right
+  // after calling renderSelected (same tick, no await in between).
+  let cardReturnAction = null;
+  // ---- routing state ("Как доехать/как дойти", claude/next-steps-routing.md) --
+  // routeState is null outside the route panel; while it's open it's always
+  // { from: {lat,lng,name}|null, to: {lat,lng,name}|null }. routePicking
+  // names which slot the NEXT map click should fill (map.on("click") below
+  // checks this before its normal hit-test/object-card flow). routeReqSeq
+  // guards against a slower, now-superseded /api/route-plan response (e.g.
+  // from swapping points twice quickly) overwriting a newer one.
+  let routeState = null;
+  let routePicking = null;
+  let routeItineraries = [];
+  let routeSelectedItin = 0;
+  let routeLoading = false;
+  let routeError = null;
+  let routeReqSeq = 0;
   let searchSnapshot = null;
   let selectedIndex = -1;
   let searchSeq = 0;
   let debounceTimer = null;
+  // Whether the isochrone currently on the map belongs to the open card's
+  // own toggle button (see toggleIsochrone) -- reset to false the moment
+  // the isochrone source is cleared (setIsochroneGeometry), including as a
+  // side effect of setSelectedGeometry whenever a DIFFERENT object gets
+  // selected, so a stale "Скрыть зону доступности" label can't survive
+  // past the card it was computed for.
+  let isochroneActive = false;
 
   function query() {
     return els.input.value.trim();
@@ -138,10 +201,68 @@
   function setSelectedGeometry(features) {
     const src = map.getSource("selected");
     if (src) src.setData({ type: "FeatureCollection", features: features || [] });
+    // The isochrone (see setIsochroneGeometry/toggleIsochrone below) belongs
+    // only to whichever object card is currently open -- every place that
+    // moves the "selected" highlight to a new/no object already calls this
+    // function right around the same time it (re)builds the card, so
+    // clearing it HERE (rather than adding a matching call at every one of
+    // those call sites individually) keeps the two in sync for free and
+    // can't be forgotten at a future new call site.
+    setIsochroneGeometry([]);
+  }
+  // "Зона доступности" (claude/next-steps-walkability-isochrone.md) — a
+  // separate GeoJSON source from "selected" (map-style.js's own comment on
+  // why "route" is split out applies here too: 4 concentric polygons need
+  // per-feature fill colors, which the single-uniform-color "selected"
+  // layers don't support, and its non-lite fill-EXTRUSION variant would
+  // draw them as 20m-tall slabs, which makes no sense for an analytic
+  // overlay). `features` is expected pre-sorted LARGEST contour first (see
+  // toggleIsochrone) -- MapLibre paints a single fill layer's features in
+  // the order they appear in the source data, so that order is what makes
+  // the smaller/closer (more saturated) rings actually show up on top of
+  // the larger/farther ones instead of being hidden underneath them.
+  function setIsochroneGeometry(features) {
+    const src = map.getSource("isochrone");
+    if (src) src.setData({ type: "FeatureCollection", features: features || [] });
+    if (!features || !features.length) isochroneActive = false;
   }
   function setSearchPoints(features) {
     const src = map.getSource("searchResults");
     if (src) src.setData({ type: "FeatureCollection", features: features || [] });
+  }
+  // Draws (or clears, with itin=null) a calculated itinerary: one line
+  // feature per leg on the "route" source (map-style.js's route-walk-line/
+  // route-transit-line layers key off each feature's own `mode`/`color`),
+  // plus one point feature per stop-role on "routePoints" (built by
+  // buildRoutePoints below — the same list the legend renders).
+  function setRouteGeometry(itin) {
+    const routeSrc = map.getSource("route");
+    const ptsSrc = map.getSource("routePoints");
+    if (!itin) {
+      if (routeSrc) routeSrc.setData({ type: "FeatureCollection", features: [] });
+      if (ptsSrc) ptsSrc.setData({ type: "FeatureCollection", features: [] });
+      return;
+    }
+    const lineFeatures = itin.legs
+      .filter((l) => l.geometry && l.geometry.coordinates && l.geometry.coordinates.length > 1)
+      .map((l) => ({ type: "Feature", geometry: l.geometry, properties: { mode: l.mode, color: l.routeColor } }));
+    const pointFeatures = buildRoutePoints(itin.legs)
+      .filter((p) => p.lat != null && p.lng != null)
+      .map((p) => ({ type: "Feature", geometry: { type: "Point", coordinates: [p.lng, p.lat] }, properties: { kind: p.kind } }));
+    if (routeSrc) routeSrc.setData({ type: "FeatureCollection", features: lineFeatures });
+    if (ptsSrc) ptsSrc.setData({ type: "FeatureCollection", features: pointFeatures });
+    // 2026-09-16: a walk-only itinerary synthesized from Motis'
+    // /api/v1/one-to-many (server/src/routes/routing.js) carries no leg
+    // geometry at all (that endpoint only ever returns duration/distance),
+    // so lineFeatures is empty for it -- falling back to the point
+    // features' own coordinates means picking that alternative still
+    // re-centers the map on start/end instead of leaving the view wherever
+    // it happened to be from the previously selected (line-having)
+    // alternative.
+    const allCoords = lineFeatures.length
+      ? lineFeatures.reduce((acc, f) => acc.concat(f.geometry.coordinates), [])
+      : pointFeatures.map((f) => f.geometry.coordinates);
+    if (allCoords.length) fitBoundsCoords(allCoords, 60);
   }
   function flyTo(lat, lng, zoom) {
     map.flyTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), zoom || 16), speed: 1.2 });
@@ -188,6 +309,53 @@
     const params = new URLSearchParams({ name, lat, lng });
     const res = await fetch(`/api/street-at?${params}`);
     return res.json();
+  }
+  // 2026-09-16 (live feedback): route-point search used to go through
+  // Motis' own geocoder (server/src/routes/routing.js's /api/route-geocode)
+  // — weak with Cyrillic/typos, per claude/next-steps-routing.md's own
+  // note. Reusing the site's own /api/search instead (same endpoint the
+  // main results list uses, via apiSearch above) gives it the same
+  // typo-tolerant, kirillic-aware ranking as the rest of the site, with no
+  // server change needed: every item that has an actual point on the map
+  // already carries lat/lng (same filter already used at the hover-hit
+  // list below), so anything without one (a rubric category, a transit
+  // line) drops out on its own.
+  async function apiRoutePointSearch(text) {
+    const data = await apiSearch(text, "all");
+    return (data.items || []).filter((it) => it.lat != null && it.lng != null);
+  }
+  // Thin proxy to server/src/routes/routing.js, which in turn proxies to a
+  // locally-running Motis (see claude/next-steps-routing.md) — calculates
+  // nothing client-side, per the original ask ("Алгоритм расчетов не делай
+  // сам, ищи готовые решения"). /api/route-geocode above it still exists
+  // server-side but is no longer called from here as of the point above.
+  async function apiRoutePlan(from, to) {
+    const params = new URLSearchParams({ fromLat: from.lat, fromLng: from.lng, toLat: to.lat, toLng: to.lng });
+    const res = await fetch(`/api/route-plan?${params}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error((data && data.error) || "route_error");
+    return data;
+  }
+  // "Зона доступности" (claude/next-steps-walkability-isochrone.md): thin
+  // proxy to server/src/routes/isochrone.js, which in turn calls a local
+  // pyvalhalla-based service (routing-proto/valhalla) -- same
+  // "calculate nothing client-side, proxy to a real routing engine"
+  // pattern as apiRoutePlan above, just a different satellite process.
+  async function apiIsochrone(lat, lng) {
+    const params = new URLSearchParams({ lat, lng });
+    const res = await fetch(`/api/isochrone?${params}`);
+    const data = await res.json();
+    if (!res.ok) {
+      const detail = data && data.detail;
+      const message =
+        data && data.error === "isochrone_engine_unreachable"
+          ? "Сервис расчёта зон доступности сейчас недоступен"
+          : detail && detail.error === "tiles_not_built"
+          ? "Граф для расчёта зон доступности ещё не построен на сервере"
+          : "Не удалось построить зону доступности";
+      throw new Error(message);
+    }
+    return data;
   }
 
   // ---- rendering: result rows -------------------------------------------------
@@ -241,13 +409,52 @@
   // results list — unlike "Показать все N", which (via choose() ->
   // loadRubric(), already existing before this wave from clicking the row
   // itself) replaces the panel with the full browsable company list.
+  // Russian plural of "точка" for a count (1 точка / 2-4 точки / 5+, 11-14
+  // точек) — same three-way pattern server/src/routes/pages.js's
+  // stopsWord()/pointsWord() already use, just needed here too since this
+  // note is client-rendered.
+  function pointsWord(n) {
+    const mod10 = n % 10, mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return "точка";
+    if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) return "точки";
+    return "точек";
+  }
+
   function relatedBlock(item, index) {
     if (!item.related || !item.related.length) return null;
     const isRubric = item.type === "rubric";
+    // 2026-09-15 live report ("нужна одна страница по этой сущности... при
+    // выдаче — только одна ссылка"): a stop's `related` siblings no longer
+    // carry their own `href` at all (search.js) — there is exactly ONE real
+    // link for the whole entity, the row's own "Открыть страницу" above
+    // (rendered by resultRow from `item.href`), which now opens a page that
+    // itself shows every point on its map (pages.js). Say so in a short
+    // note instead of the generic "Связанные объекты" heading, so the
+    // missing per-row links read as "by design", not as something broken.
+    const isStop = item.type === "stop";
+    // 2026-09-15 (Point 2 migration): a `company` result only ever carries
+    // `related` when it's the primary of a same-name city-wide chain
+    // cluster (search.js's getClusterMembers branch) — every OTHER type of
+    // company result has no `related` at all, so this check doesn't need
+    // its own separate server-sent flag.
+    const isCompanyCluster = item.type === "company";
+    const title = isRubric
+      ? "Организации"
+      : isStop
+      ? "Другие точки этой остановки"
+      : isCompanyCluster
+      ? `Другие адреса «${item.name}»`
+      : "Связанные объекты";
+    const note = isStop
+      ? `<p class="map-search-related__note">Эта остановка объединяет ${item.related_total + 1} ${pointsWord(item.related_total + 1)} посадки одного места — все показаны на карте, страница объекта одна для всех точек (см. «Открыть страницу» выше).</p>`
+      : isCompanyCluster
+      ? `<p class="map-search-related__note">«${esc(item.name)}» встречается в ${item.related_total + 1} местах города — ссылка выше ведёт на основной адрес; остальные адреса ниже, кнопка «Показать на карте» отметит их все.</p>`
+      : "";
     const box = document.createElement("div");
     box.className = "map-search-related" + (isRubric ? " map-search-related--rubric" : "");
     box.innerHTML = `
-      <div class="map-search-related__title">${isRubric ? "Организации" : "Связанные объекты"}</div>
+      <div class="map-search-related__title">${title}</div>
+      ${note}
       ${item.related
         .map(
           (r) => `
@@ -259,17 +466,35 @@
         .join("")}
       <div class="map-search-related__actions">
         ${
-          item.related_total > item.related.length
+          !isStop && item.related_total > item.related.length
             ? `<button class="map-search-related__more" type="button">Показать все ${item.related_total}</button>`
             : ""
         }
         ${isRubric ? `<button class="map-search-related__onmap" type="button">Показать все на карте</button>` : ""}
+        ${isCompanyCluster ? `<button class="map-search-related__onmap" type="button">Показать на карте</button>` : ""}
       </div>`;
     const more = box.querySelector(".map-search-related__more");
     if (more) more.addEventListener("click", () => choose(index));
     const onMap = box.querySelector(".map-search-related__onmap");
-    if (onMap) onMap.addEventListener("click", () => showRubricOnMap(item));
+    if (onMap) onMap.addEventListener("click", () => (isCompanyCluster ? showClusterOnMap(item) : showRubricOnMap(item)));
     return box;
+  }
+
+  // Lighter version of showRubricOnMap() for a company chain cluster
+  // (2026-09-15, Point 2 migration) — no API round trip needed since every
+  // member's coordinates already travelled down with the search result
+  // itself (search.js's getClusterMembers branch), unlike a rubric's full
+  // company list which can run into the hundreds/thousands.
+  function showClusterOnMap(item) {
+    const points = [{ lat: item.lat, lng: item.lng, name: item.name }, ...item.related].filter((p) => p.lat != null && p.lng != null);
+    setSearchPoints(
+      points.map((p) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [p.lng, p.lat] },
+        properties: { name: p.name, type: "company" },
+      }))
+    );
+    if (points.length) fitBoundsCoords(points.map((p) => [p.lng, p.lat]));
   }
 
   // "Показать все на карте" (2026-09-14, second wave) — a lighter-weight
@@ -460,9 +685,13 @@
       return renderRouteSelected(item);
     }
 
-    if (item.type === "address" || item.type === "district" || item.type === "settlement") {
+    if (item.type === "address" || item.type === "district" || item.type === "settlement" || item.type === "raion" || item.type === "park") {
       const obj = await apiObject(item.type, item.id);
-      renderSelected(item, obj);
+      // Picked from the results list, not a map click — there's no actual
+      // click point to anchor coordinates/route buttons to, so this falls
+      // back to the object's own centroid (obj.lat/obj.lon), same as a
+      // `?sel=` deep link (selectFromUrl below).
+      renderSelected(item, obj, obj && obj.lat != null ? { lat: obj.lat, lng: obj.lon } : null);
       if (obj && obj.geometry) {
         setSelectedGeometry([{ type: "Feature", geometry: obj.geometry, properties: {} }]);
         const coords = flattenCoords(obj.geometry);
@@ -476,7 +705,7 @@
     }
 
     // company / stop / metro / rail / terminal — point features
-    renderSelected(item, null);
+    renderSelected(item, null, item.lat != null ? { lat: item.lat, lng: item.lng } : null);
     if (item.lat != null && item.lng != null) {
       setSelectedGeometry([{ type: "Feature", geometry: { type: "Point", coordinates: [item.lng, item.lat] }, properties: {} }]);
       flyTo(item.lat, item.lng, 17);
@@ -501,7 +730,16 @@
   // SPECIFIC same-named cluster this is (see streetCluster.js) the same way
   // /api/object/street/:id does for the line geometry, so both requests can
   // run in parallel against the one id.
-  async function loadStreetHouses(item) {
+  // 2026-09-16 (live report — street's house-list panel was the fourth
+  // inconsistent shape shown alongside park/metro/address: no coordinates,
+  // no "Подробнее" link, no route buttons at all). `coords`, when given, is
+  // the actual point the user clicked (resolveStreetClick, below — a real
+  // map click on the road itself); a street picked from the results list
+  // (choose()) has no such point, so this falls back to the street's own
+  // geometry's first vertex — an approximate but real point on the actual
+  // line, good enough for "where is this on the map" the same way a
+  // district/park's centroid is for those types.
+  async function loadStreetHouses(item, coords) {
     mode = "street-houses";
     searchSnapshot = { results: results.slice() };
     els.headTitle.textContent = TYPE_LABEL.street;
@@ -512,11 +750,20 @@
     if (mode !== "street-houses") return; // user navigated away while this was in flight
     streetHouseItems = data.items || [];
     streetHouseMeta = data.meta || { name: item.name, total: 0, returned: 0, partial: false };
+    streetHouseMeta.href = obj ? obj.href : null;
+    if (coords) {
+      streetHouseMeta.coords = coords;
+    } else if (obj && obj.geometry) {
+      const c = flattenCoords(obj.geometry)[0];
+      streetHouseMeta.coords = c ? { lat: c[1], lng: c[0] } : null;
+    } else {
+      streetHouseMeta.coords = null;
+    }
     if (obj && obj.geometry && obj.geometry.geometries) {
       const feats = obj.geometry.geometries.map((g) => ({ type: "Feature", geometry: g, properties: {} }));
       setSelectedGeometry(feats);
-      const coords = feats.flatMap((f) => flattenCoords(f.geometry));
-      if (coords.length) fitBoundsCoords(coords);
+      const coordsList = feats.flatMap((f) => flattenCoords(f.geometry));
+      if (coordsList.length) fitBoundsCoords(coordsList);
     }
     renderStreetHousesList(item);
   }
@@ -524,6 +771,7 @@
   function renderStreetHousesList(item) {
     mode = "street-houses";
     const name = streetHouseMeta.name || item.name;
+    const pt = streetHouseMeta.coords || null;
     els.headTitle.textContent = name;
     els.resultCount.textContent = `Домов: ${streetHouseMeta.total}`;
     const head = document.createElement("div");
@@ -532,10 +780,14 @@
       <button class="map-selected-back js-street-houses-back" type="button">← К результатам поиска</button>
       <strong>${esc(TYPE_LABEL.street)}</strong>
       <h2>${esc(name)}</h2>
-      <p>${streetHouseMeta.total} домов с адресом${streetHouseMeta.partial ? " (показаны первые " + streetHouseItems.length + ")" : ""}</p>`;
+      <p>${streetHouseMeta.total} домов с адресом${streetHouseMeta.partial ? " (показаны первые " + streetHouseItems.length + ")" : ""}</p>
+      ${coordsHtml(pt && pt.lat, pt && pt.lng)}
+      ${streetHouseMeta.href ? `<a class="map-selected-link map-selected-open" href="${esc(streetHouseMeta.href)}" target="_blank" rel="noopener">${esc(moreLinkText({ type: "street", name }))} →</a>` : ""}
+      ${routeButtonsHtml(pt && pt.lat, pt && pt.lng)}`;
     els.results.innerHTML = "";
     els.results.appendChild(head);
     head.querySelector(".js-street-houses-back").addEventListener("click", returnFromStreetHouses);
+    bindRouteButtons(head, pt && pt.lat, pt && pt.lng, name);
 
     if (!streetHouseItems.length) {
       els.results.insertAdjacentHTML("beforeend", '<div class="map-search-empty">Дома с известным номером на этой улице не найдены.</div>');
@@ -556,12 +808,25 @@
     updateShare();
   }
 
-  function selectStreetHouse(index) {
-    mode = "street-house";
+  // 2026-09-15 live report, point 2: clicking a house in the drill-down
+  // list used to only highlight it on the map (no way to reach its page at
+  // all from here — the user had to separately find and click the matching
+  // pin on the map, which `openObjectDetails` DOES open a card for). Now
+  // mirrors that exact flow (fetch the full object, open the same "Объект
+  // на карте" card, same href/directions), with the one difference that
+  // "back" returns to THIS house list, not the outer search results —
+  // via `cardReturnAction` (see its own comment).
+  async function selectStreetHouse(index) {
     const item = streetHouseItems[index];
     if (!item) return;
-    Array.from(els.results.querySelectorAll(".map-rubric-company")).forEach((r, i) => r.classList.toggle("is-active", i === index));
-    if (item.lat != null) {
+    const obj = await apiObject("address", item.id);
+    renderSelected(item, obj, obj && obj.lat != null ? { lat: obj.lat, lng: obj.lon } : (item.lat != null ? { lat: item.lat, lng: item.lng } : null));
+    cardReturnAction = () => renderStreetHousesList({ name: streetHouseMeta.name });
+    if (obj && obj.geometry) {
+      setSelectedGeometry([{ type: "Feature", geometry: obj.geometry, properties: {} }]);
+      const coords = flattenCoords(obj.geometry);
+      if (coords.length) fitBoundsCoords(coords);
+    } else if (item.lat != null) {
       setSelectedGeometry([{ type: "Feature", geometry: { type: "Point", coordinates: [item.lng, item.lat] }, properties: {} }]);
       flyTo(item.lat, item.lng, 17);
     }
@@ -587,21 +852,216 @@
     }
   }
 
-  function renderSelected(item, obj) {
+  // 2026-09-15 (live report, point 1: "В карточке объекта нужна ссылка на
+  // страницу объекта") — this card is reached two different ways, each
+  // carrying the object's real page URL in a different place: a search
+  // RESULT row's own `item.href` (search.js, already used by `resultRow`'s
+  // "Открыть страницу" — see there) when opened via `choose()`, or the
+  // freshly-fetched `obj.href` (object.js's `/api/object/:type/:id`, added
+  // alongside this fix) when opened via a map click (openObjectDetails) or a
+  // `?sel=type:id` deep link (selectFromUrl) — those build `item` from
+  // scratch with no `href` of its own. Checking both, in that order, covers
+  // every path into this card with the one link, same wording/target as the
+  // results list.
+  // 2026-09-15 live report, point 3 ("карточка замусорена повторениями и не
+  // даёт важной информации... самое важное - проезд, как добраться"): this
+  // card used to print the object's TYPE three times over (once in the
+  // results-panel header via `resultCount` below, again in its own
+  // `.map-selected-type` span, and a third time whenever the caller had set
+  // `item.subtitle` to that same TYPE_LABEL string, e.g. openObjectDetails/
+  // selectFromUrl below) while never showing anything an actual visitor
+  // came for. Fixed by (a) dropping the in-card type span — the header line
+  // already says it once, (b) only printing `subtitle` when it carries
+  // information beyond the type/name already shown (callers now compute a
+  // real one — street address, rubric, etc. — instead of repeating
+  // TYPE_LABEL), and (c) surfacing a compact "Как добраться" preview from
+  // `obj.directions` (transportNearby.getKakProehat, added server-side
+  // alongside this) — full detail (every nearby stop, per-route notes)
+  // stays on the object's own page; this is deliberately just enough to
+  // answer "can I get there at all", matching what "Открыть страницу"
+  // promises.
+  // 2026-09-16 (live report, 4 screenshots of a park/metro/address/street
+  // click each producing a differently-shaped result — "делай по единому
+  // стандарту, всю информацию в карточке слева"): every object type now
+  // renders through this ONE function with the SAME fields — name,
+  // coordinates, a "Подробнее о …" link (when a real page exists), the
+  // compact "Как добраться" preview (when known), and a pair of
+  // "Маршрут отсюда/сюда" buttons — instead of a native maplibregl.Popup
+  // for some types (park/quarter/water — see the removed placeholder popups
+  // in the click handler below) and a bare name-only card for others.
+  //
+  // `coords`, when given as `{lat, lng}`, is the ANCHOR point this card's
+  // coordinates line and route buttons use. For a point object (address,
+  // company, stop) that's always going to be close to the object's own
+  // lat/lon regardless of how the card was opened. For an AREA object
+  // (district/raion/park/street) it matters which point: opened via an
+  // actual map click (resolveAreaClick/resolveStreetClick below), `coords`
+  // is the exact spot clicked — "в случае больших объектов прокладываем до
+  // координаты клика" (live report) — so two clicks on opposite ends of the
+  // same large park each anchor a route to where the person actually
+  // pointed, not to one fixed centroid. Opened from a list/search result
+  // instead (no click to anchor to), callers fall back to the object's own
+  // centroid — see this function's call sites.
+  function renderSelected(item, obj, coords) {
+    cardReturnAction = null;
     mode = "object";
     els.headTitle.textContent = "Объект на карте";
     els.resultCount.textContent = TYPE_LABEL[item.type] || "Объект";
     const subtitle = item.subtitle || "";
+    const href = item.href || (obj && obj.href) || null;
+    const pointLat = coords && coords.lat != null ? coords.lat : (obj && obj.lat != null ? obj.lat : (item.lat != null ? item.lat : null));
+    const pointLng = coords && coords.lng != null ? coords.lng
+      : (obj && obj.lon != null ? obj.lon : (obj && obj.lng != null ? obj.lng : (item.lng != null ? item.lng : null)));
+    const openLink = href
+      ? `<a class="map-selected-link map-selected-open" href="${esc(href)}" target="_blank" rel="noopener">${esc(moreLinkText(item))} →</a>`
+      : "";
+    const directions = obj && obj.directions ? directionsHtml(obj.directions) : "";
     els.results.innerHTML = `
       <div class="map-selected-card">
         <button class="map-selected-back js-back" type="button">← К результатам</button>
-        <span class="map-selected-type">${esc(TYPE_LABEL[item.type] || "Объект")}</span>
         <h2>${esc(item.name)}</h2>
-        <p>${esc(subtitle)}</p>
+        ${subtitle ? `<p>${esc(subtitle)}</p>` : ""}
+        ${coordsHtml(pointLat, pointLng)}
+        ${directions}
+        ${openLink}
+        ${routeButtonsHtml(pointLat, pointLng)}
+        ${isochroneButtonHtml(pointLat, pointLng)}
+        <div class="js-isochrone-panel"></div>
         <div class="js-extra"></div>
       </div>`;
     els.results.querySelector(".js-back").addEventListener("click", returnToResults);
+    bindRouteButtons(els.results, pointLat, pointLng, item.name);
+    bindIsochroneButton(els.results, pointLat, pointLng);
     updateShare();
+  }
+
+  // Shown on every card that has a real point to anchor to — see
+  // renderSelected's own comment on where `coords` comes from for each
+  // object type/entry path.
+  function coordsHtml(lat, lng) {
+    if (lat == null || lng == null) return "";
+    return `<p class="map-selected-coords">Координаты: ${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)}</p>`;
+  }
+
+  // "Проложить маршрут (отсюда, сюда)" — opens the route panel
+  // (openRoutePanel below) with this point already captured as the from/to
+  // anchor, so only the OTHER point needs picking before a real itinerary
+  // is calculated (via the Motis proxy, server/src/routes/routing.js).
+  function routeButtonsHtml(lat, lng) {
+    if (lat == null || lng == null) return "";
+    return `<div class="map-selected-directions">
+      <button class="js-route-from" type="button">Маршрут отсюда</button>
+      <button class="js-route-to" type="button">Маршрут сюда</button>
+    </div>`;
+  }
+
+  function bindRouteButtons(container, lat, lng, name) {
+    if (lat == null || lng == null) return;
+    const fromBtn = container.querySelector(".js-route-from");
+    const toBtn = container.querySelector(".js-route-to");
+    if (fromBtn) fromBtn.addEventListener("click", () => openRoutePanel({ role: "from", name, lat, lng }));
+    if (toBtn) toBtn.addEventListener("click", () => openRoutePanel({ role: "to", name, lat, lng }));
+  }
+
+  // "Зона доступности" button — deliberately its OWN row (not folded into
+  // routeButtonsHtml/bindRouteButtons above), scoped to renderSelected's
+  // object card only for this first iteration (claude/next-steps-
+  // walkability-isochrone.md — the street-houses drill-down panel, the
+  // OTHER caller of routeButtonsHtml, was left out on purpose rather than
+  // silently gaining this too as a side effect of touching shared code).
+  function isochroneButtonHtml(lat, lng) {
+    if (lat == null || lng == null) return "";
+    return `<div class="map-selected-directions map-selected-isochrone">
+      <button class="js-isochrone" type="button">Зона доступности</button>
+    </div>`;
+  }
+
+  function bindIsochroneButton(container, lat, lng) {
+    if (lat == null || lng == null) return;
+    const btn = container.querySelector(".js-isochrone");
+    if (!btn) return;
+    btn.addEventListener("click", () => toggleIsochrone(lat, lng, container));
+  }
+
+  // 5/10/15/20-minute walk contours from server/src/routes/isochrone.js
+  // (pedestrian-only for this first iteration, per the same doc). Toggling
+  // OFF just clears the source — re-toggling ON re-fetches rather than
+  // caching, since this is a cheap single-point call and caching would need
+  // its own invalidation story for zero real benefit here.
+  async function toggleIsochrone(lat, lng, container) {
+    const btn = container.querySelector(".js-isochrone");
+    const panel = container.querySelector(".js-isochrone-panel");
+    if (isochroneActive) {
+      setIsochroneGeometry([]);
+      if (btn) { btn.classList.remove("is-active"); btn.textContent = "Зона доступности"; }
+      if (panel) panel.innerHTML = "";
+      return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = "Считаем…"; }
+    if (panel) panel.innerHTML = `<p class="map-isochrone-status">Считаем зону пешей доступности…</p>`;
+    try {
+      const data = await apiIsochrone(lat, lng);
+      // Sort defensively rather than trusting the upstream order to stay
+      // largest-first forever — see setIsochroneGeometry's comment on why
+      // the order matters for rendering.
+      const features = (data.features || [])
+        .slice()
+        .sort((a, b) => (b.properties.contour || 0) - (a.properties.contour || 0));
+      setIsochroneGeometry(features);
+      isochroneActive = true;
+      if (btn) { btn.disabled = false; btn.classList.add("is-active"); btn.textContent = "Скрыть зону доступности"; }
+      if (panel) panel.innerHTML = isochroneLegendHtml(features);
+      const allCoords = features.flatMap((f) => (f.geometry && f.geometry.coordinates && f.geometry.coordinates[0]) || []);
+      if (allCoords.length) fitBoundsCoords(allCoords, 40);
+    } catch (err) {
+      if (btn) { btn.disabled = false; btn.textContent = "Зона доступности"; }
+      if (panel) panel.innerHTML = `<p class="map-isochrone-status is-error">${esc((err && err.message) || "Не удалось построить зону доступности")}</p>`;
+    }
+  }
+
+  function isochroneLegendHtml(features) {
+    const rows = features
+      .slice()
+      .sort((a, b) => (a.properties.contour || 0) - (b.properties.contour || 0))
+      .map(
+        // f.properties.color comes straight from Valhalla, already
+        // "#"-prefixed (server/src/routes/isochrone.js's own comment, and
+        // map-style.js's isochrone-fill/-line layers, note the same thing)
+        // -- no extra "#" here.
+        (f) =>
+          `<span class="map-isochrone-legend__item"><i style="background:${esc(String(f.properties.color || "#999"))}"></i>${esc(
+            String(f.properties.contour)
+          )} мин</span>`
+      )
+      .join("");
+    return `<div class="map-isochrone-legend">${rows}</div>`;
+  }
+
+  // Compact "Metro/stops within reach" preview — see renderSelected's
+  // comment for why this exists and why it's deliberately shorter than the
+  // full block on the object's own page (kakProehatHtml, pages.js): one
+  // nearest metro (if any) plus up to 2 nearest surface stops with their
+  // route numbers, no per-route "N ост. до метро" annotations — those stay
+  // page-only detail. Returns "" (renders nothing) when there's genuinely
+  // nothing nearby, same "no data, no block" rule pages.js's version uses.
+  function directionsHtml(directions) {
+    const metro = directions.metro || [];
+    const stops = (directions.surface && directions.surface.stops) || [];
+    if (!metro.length && !stops.length) return "";
+    const rows = [];
+    if (metro.length) {
+      const m = metro[0];
+      rows.push(`<div class="map-selected-transport__row">Метро «${esc(m.name)}» · ${m.distanceM} м</div>`);
+    }
+    stops.slice(0, 2).forEach((s) => {
+      const refs = [...new Set(s.routes.filter((r) => r.ref).map((r) => r.ref))].slice(0, 6);
+      rows.push(
+        `<div class="map-selected-transport__row">${esc(s.typeLabel || "Остановка")} «${esc(s.name)}» · ${s.distanceM} м${
+          refs.length ? " — " + refs.map(esc).join(", ") : ""
+        }</div>`
+      );
+    });
+    return `<div class="map-selected-transport"><p class="map-selected-transport__title">Как добраться</p>${rows.join("")}</div>`;
   }
 
   function appendCompanyDetails(obj) {
@@ -611,7 +1071,7 @@
     if (obj.phone) rows.push(`<p>☎ ${esc(obj.phone)}</p>`);
     if (obj.website) rows.push(`<p><a class="map-selected-link" href="${esc(obj.website)}" target="_blank" rel="noopener">${esc(obj.website)}</a></p>`);
     if (obj.opening_hours) rows.push(`<p>Часы работы: ${esc(obj.opening_hours)}</p>`);
-    extra.innerHTML = rows.join("");
+    extra.innerHTML = rows.join("") + (obj.directions ? directionsHtml(obj.directions) : "");
   }
 
   function appendStopRoutes(obj) {
@@ -624,13 +1084,13 @@
   }
 
   async function renderRouteSelected(item) {
+    cardReturnAction = null;
     mode = "object";
     els.headTitle.textContent = "Маршрут транспорта";
     els.resultCount.textContent = TYPE_LABEL.route;
     els.results.innerHTML = `
       <div class="map-selected-card">
         <button class="map-selected-back js-back" type="button">← К результатам</button>
-        <span class="map-selected-type">${esc(TYPE_LABEL.route)}</span>
         <h2>${esc(item.name)}</h2>
         <div class="map-route-stops js-stops"><div class="map-search-loading">Загружаем остановки…</div></div>
       </div>`;
@@ -657,8 +1117,19 @@
   function returnToResults() {
     selectedIndex = -1;
     setSelectedGeometry([]);
-    if (mode === "rubric-company" && rubricMeta) {
-      return renderRubricList();
+    // Leaving ANY card/panel always drops a calculated route + cancels an
+    // in-progress "pick a point on the map" — cheapest to do unconditionally
+    // here (the one shared exit path every panel's back button already
+    // calls) than to remember which specific callers need it.
+    setRouteGeometry(null);
+    stopRoutePicking();
+    routeState = null;
+    routeItineraries = [];
+    routeError = null;
+    if (cardReturnAction) {
+      const action = cardReturnAction;
+      cardReturnAction = null;
+      return action();
     }
     mode = "listing";
     render();
@@ -713,14 +1184,27 @@
     updateShare();
   }
 
-  function selectRubricCompany(index) {
-    mode = "rubric-company";
+  // Same fix as selectStreetHouse above (2026-09-15 live report, point 2),
+  // applied symmetrically: a company picked from a rubric's full list had
+  // exactly the same gap (no way to reach its page from the list itself).
+  // Fetches the full object BEFORE rendering (unlike choose()'s company
+  // branch, which can render immediately because a search-result `item`
+  // already carries its own `href` from search.js) — `/api/rubric/:name`'s
+  // rows don't carry one, only `/api/object/company/:id` does.
+  async function selectRubricCompany(index) {
     const item = rubricItems[index];
-    Array.from(els.results.querySelectorAll(".map-rubric-company")).forEach((r, i) => r.classList.toggle("is-active", i === index));
-    if (item.lat != null) {
+    if (!item) return;
+    const obj = await apiObject("company", item.id);
+    renderSelected(item, obj, obj && obj.lat != null ? { lat: obj.lat, lng: obj.lon } : (item.lat != null ? { lat: item.lat, lng: item.lng } : null));
+    cardReturnAction = () => renderRubricList();
+    if (obj && obj.lat != null && obj.lon != null) {
+      setSelectedGeometry([{ type: "Feature", geometry: { type: "Point", coordinates: [obj.lon, obj.lat] }, properties: {} }]);
+      flyTo(obj.lat, obj.lon, 17);
+    } else if (item.lat != null) {
       setSelectedGeometry([{ type: "Feature", geometry: { type: "Point", coordinates: [item.lng, item.lat] }, properties: {} }]);
       flyTo(item.lat, item.lng, 17);
     }
+    if (obj) appendCompanyDetails(obj);
   }
 
   function returnFromRubric() {
@@ -785,43 +1269,454 @@
     else window.prompt("Скопируйте ссылку", value);
   });
 
-  // ---- routing stub -------------------------------------------------
-  els.routeOpen.addEventListener("click", () => {
-    mode = "route-stub";
-    setSelectedGeometry([]);
+  // ---- routing ("Как доехать / как дойти") -------------------------------------------------
+  // claude/next-steps-routing.md has the full design history. Short version:
+  // calculation itself is NOT done here or on our server — it's proxied
+  // (server/src/routes/routing.js) to a locally-run Motis process, chosen
+  // after directly comparing it with OpenTripPlanner 2 on real Sofia data.
+  // This block only owns: picking two points (by name via Motis' own
+  // geocoder, or by clicking the map), calling the proxy, and rendering the
+  // result (map styling in map-style.js's route-*/routePoints layers, plus
+  // the legend below).
+  const ROUTE_POINT_LABEL = { start: "Начало", board: "Посадка", transfer: "Пересадка", alight: "Высадка", end: "Конец" };
+  const ROUTE_MODE_LABEL = { WALK: "Пешком", BUS: "Автобус", TRAM: "Трамвай", TROLLEYBUS: "Тролейбус", SUBWAY: "Метро", RAIL: "Ж/д" };
+
+  function formatClock(iso) {
+    if (!iso) return "";
+    try {
+      return new Date(iso).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+    } catch (e) {
+      return "";
+    }
+  }
+  function formatDistance(m) {
+    if (m == null) return "";
+    return m >= 1000 ? `${(m / 1000).toFixed(1)} км` : `${Math.round(m)} м`;
+  }
+  // Same pluralization pattern as stopsDirectory-adjacent server code
+  // (recordsWord in coord.js) — "1 пересадка" / "2 пересадки" / "5 пересадок".
+  function transferWord(n) {
+    const mod10 = n % 10, mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return "пересадка";
+    if (mod10 >= 2 && mod10 <= 4 && !(mod100 >= 12 && mod100 <= 14)) return "пересадки";
+    return "пересадок";
+  }
+  // ~50m tolerance for "is this the same physical stop" — matching Motis'
+  // own from/to coordinates for two adjacent legs (rounding noise aside,
+  // an interlined transfer's shared stop reports identical coordinates on
+  // both legs, so this is a generous, not a tight, threshold).
+  function pointsClose(a, b) {
+    if (!a || !b || a.lat == null || b.lat == null) return false;
+    return Math.abs(a.lat - b.lat) < 0.0006 && Math.abs(a.lng - b.lng) < 0.0006;
+  }
+  // Turns a flat legs[] array into the ordered "Список всех точек (начало,
+  // конец, посадка, пересадка, высадка)" the legend shows — the request
+  // this whole feature started from asked for exactly this list. A WALK
+  // leg's own endpoints never become a point of their own (only start/end
+  // ever come from a WALK leg, at the very ends of the trip); two
+  // back-to-back transit legs sharing a stop (no walk in between) collapse
+  // into a single "transfer" point instead of an alight+board pair at the
+  // same spot.
+  function buildRoutePoints(legs) {
+    if (!legs || !legs.length) return [];
+    const events = [{ kind: "start", ...legs[0].from }];
+    const transitLegs = legs.filter((l) => l.mode && l.mode !== "WALK");
+    transitLegs.forEach((cur, i) => {
+      const prev = transitLegs[i - 1];
+      const next = transitLegs[i + 1];
+      if (!(prev && pointsClose(prev.to, cur.from))) {
+        events.push({ kind: "board", ...cur.from, routeName: cur.routeName });
+      }
+      const mergesWithNext = next && pointsClose(cur.to, next.from);
+      events.push({ kind: mergesWithNext ? "transfer" : "alight", ...cur.to, routeName: cur.routeName });
+    });
+    events.push({ kind: "end", ...legs[legs.length - 1].to });
+    return events;
+  }
+
+  function pointRowHtml(p) {
+    const label = ROUTE_POINT_LABEL[p.kind] || p.kind;
+    return `<div class="map-route-point map-route-point--${p.kind}">
+      <span class="map-route-point__dot"></span>
+      <span class="map-route-point__text"><strong>${esc(label)}:</strong> ${esc(p.name || "точка на карте")}${
+        p.routeName ? ` (${esc(p.routeName)})` : ""
+      }</span>
+    </div>`;
+  }
+  function legRowHtml(l) {
+    const minutes = l.duration != null ? Math.round(l.duration / 60) : null;
+    const desc =
+      l.mode === "WALK"
+        ? `Пешком${l.distance != null ? " · " + esc(formatDistance(l.distance)) : ""}`
+        : `${esc(ROUTE_MODE_LABEL[l.mode] || l.mode)}${l.routeName ? " " + esc(l.routeName) : ""}${l.headsign ? " → " + esc(l.headsign) : ""}`;
+    const swatchColor = l.mode === "WALK" ? "#999" : l.routeColor || "#3B3FA6";
+    return `<div class="map-route-leg">
+      <span class="map-route-leg__swatch" style="background:${esc(swatchColor)}"></span>
+      <span class="map-route-leg__text">${desc}</span>
+      <span class="map-route-leg__time">${minutes != null ? `${minutes} мин` : ""}</span>
+    </div>`;
+  }
+
+  function routeResultHtml() {
+    if (!routeState || !routeState.from || !routeState.to) {
+      return `<p class="map-route-hint">Укажите обе точки — по названию или кликом на карте — чтобы построить маршрут.</p>`;
+    }
+    if (routeLoading) return `<div class="map-search-loading">Строим маршрут…</div>`;
+    if (routeError) return `<div class="map-search-error">${esc(routeError)}</div>`;
+    if (!routeItineraries.length) return `<div class="map-search-empty">Маршрут между этими точками не найден.</div>`;
+    const itin = routeItineraries[routeSelectedItin];
+    const points = buildRoutePoints(itin.legs);
+    const totalMin = itin.duration != null ? Math.round(itin.duration / 60) : null;
+    const switchHtml =
+      routeItineraries.length > 1
+        ? `<div class="map-route-itin-switch">${routeItineraries
+            .map(
+              (it, i) =>
+                `<button type="button" class="js-route-itin${i === routeSelectedItin ? " is-active" : ""}" data-i="${i}">${
+                  it.duration != null ? Math.round(it.duration / 60) + " мин" : "вариант " + (i + 1)
+                }</button>`
+            )
+            .join("")}</div>`
+        : "";
+    return `
+      <div class="map-route-summary">
+        ${totalMin != null ? `<strong>${totalMin} мин</strong> · ` : ""}${formatClock(itin.startTime)}–${formatClock(itin.endTime)}${
+      itin.transfers ? ` · ${itin.transfers} ${transferWord(itin.transfers)}` : ""
+    }
+      </div>
+      ${switchHtml}
+      <div class="map-route-points">
+        <p class="map-route-block-title">Точки маршрута</p>
+        ${points.map(pointRowHtml).join("")}
+      </div>
+      <div class="map-route-legs">
+        <p class="map-route-block-title">Участки пути</p>
+        ${itin.legs.map(legRowHtml).join("")}
+      </div>`;
+  }
+
+  // 2026-09-16 (live feedback, second issue): the old "Выбрать на карте"
+  // button stayed on an unfilled slot even once a plain map click already
+  // worked for it (autoRoutePickRole below) — visually implying the click
+  // alone wouldn't be enough. Replaced with a plain-text hint (no button,
+  // nothing to press) whose wording itself flips once this slot is armed
+  // for the next map click, same signal the button's label used to give.
+  function pointSlotHtml(role) {
+    const p = routeState && routeState[role];
+    const label = role === "from" ? "От" : "До";
+    const roleWord = role === "from" ? "от" : "до";
+    if (p) {
+      return `<div class="map-route-point-slot is-filled">
+        <span class="map-route-point-slot__label">${label}</span>
+        <span class="map-route-point-slot__name">${esc(p.name || "Точка на карте")}</span>
+        <button type="button" class="map-route-point-slot__clear js-route-clear" data-role="${role}" aria-label="Убрать точку">✕</button>
+      </div>`;
+    }
+    const picking = routePicking === role || autoRoutePickRole() === role;
+    return `<div class="map-route-point-slot${picking ? " is-picking" : ""}" data-role="${role}">
+      <span class="map-route-point-slot__label">${label}</span>
+      <div class="map-route-search js-route-search" data-role="${role}">
+        <input type="text" class="map-route-search__input" placeholder="Название точки..." autocomplete="off" />
+        <div class="map-route-search-list js-route-search-list"></div>
+      </div>
+      <p class="map-route-point-slot__hint">${
+        picking ? `Кликните на карте, чтобы указать точку «${roleWord}»` : `Кликните на карте или введите в поиске точку «${roleWord}»`
+      }</p>
+    </div>`;
+  }
+
+  function renderRoutePanel() {
+    mode = "route";
     els.headTitle.textContent = "Маршрут";
-    els.resultCount.textContent = "В разработке";
+    els.resultCount.textContent = routeState && routeState.from && routeState.to ? "Построен" : "Выберите точки";
     els.results.innerHTML = `
-      <div class="map-route-stub">
+      <div class="map-route-panel">
         <button class="map-selected-back js-back" type="button">← К результатам</button>
-        <span class="badge">Скоро</span>
-        <h2>Построение маршрута появится позже</h2>
-        <p>Расчёт маршрутов между двумя точками (общественный транспорт, пешком) — отдельная задача,
-        которая разрабатывается независимо от карты. Здесь будет выбор точек А и Б на карте и
-        расчёт вариантов проезда.</p>
+        <h2>Как доехать / как дойти</h2>
+        <div class="map-route-points-input">
+          ${pointSlotHtml("from")}
+          <button type="button" class="map-route-swap js-route-swap" title="Поменять местами" ${
+            routeState && (routeState.from || routeState.to) ? "" : "disabled"
+          }>⇅</button>
+          ${pointSlotHtml("to")}
+        </div>
+        <div class="js-route-body">${routeResultHtml()}</div>
       </div>`;
     els.results.querySelector(".js-back").addEventListener("click", returnToResults);
-  });
+    els.results.querySelectorAll(".js-route-clear").forEach((btn) => btn.addEventListener("click", () => clearRoutePoint(btn.dataset.role)));
+    const swapBtn = els.results.querySelector(".js-route-swap");
+    if (swapBtn) swapBtn.addEventListener("click", swapRoutePoints);
+    els.results.querySelectorAll(".js-route-itin").forEach((btn) =>
+      btn.addEventListener("click", () => {
+        routeSelectedItin = parseInt(btn.dataset.i, 10);
+        renderRoutePanel();
+        setRouteGeometry(routeItineraries[routeSelectedItin]);
+      })
+    );
+    bindPointSearch("from");
+    bindPointSearch("to");
+    updateShare();
+  }
 
-  // ---- hover: highlight + cursor + popup on buildings/streets/quarters/stops/search results --------------
-  // Buildings, street lines, quarter names, stops, and now search result
-  // markers/clusters all get the same three things on hover: (1) a
-  // highlight (feature-state on the vector layers; the "hover" geojson
-  // source for the three point layers with no stable tile id — stops,
-  // search points, search clusters), (2) a pointer cursor instead of the
-  // default grab, (3) a small popup with whatever info is cheaply
-  // available (a cluster is the one exception — see `showPopupContent`).
-  // Where a real detail view already exists — address/company/stop via the
-  // same apiObject+renderSelected flow `choose()` uses for a search
-  // result — the popup's "Подробнее" opens it; that's today's stand-in for
-  // "the object's page" (none exist yet — "Страниц сейчас нет,
-  // планируем"). Quarters (place-labels) have no backing database object
-  // at all, only an OSM point name (pipeline/sofia-schema.yml), so their
-  // popup says a page is coming instead of faking a link — same "Скоро"
-  // convention as the routing stub above. This is documented as a single
-  // rules table (per object type: highlight / cursor / hover popup /
-  // click) in the project notes — see `claude/hover-click-rules.md` — kept
-  // in sync with whatever's implemented here.
+  // Debounced search-by-name against the site's own /api/search
+  // (apiRoutePointSearch above), scoped to whichever point slot's input
+  // this is — rebuilt fresh on every renderRoutePanel() call (the whole
+  // panel is replaced), so this only needs to attach listeners to whatever
+  // is in the DOM right now. Updates just the result list, not the whole
+  // panel, so typing never loses focus.
+  function bindPointSearch(role) {
+    const wrap = els.results.querySelector(`.js-route-search[data-role="${role}"]`);
+    if (!wrap) return;
+    const input = wrap.querySelector("input");
+    const list = wrap.querySelector(".js-route-search-list");
+    let timer = null;
+    let seq = 0;
+    // 2026-09-16: focusing the field (a click into it, or tabbing in) arms
+    // this slot for the next map click too — same effect the old "Выбрать
+    // на карте" button used to have, minus the extra click on a button that
+    // did nothing typing itself couldn't already imply. Doesn't re-render
+    // the panel (that would drop the focus this handler just received) —
+    // just flips the state + the already-rendered slots' own classes/text.
+    input.addEventListener("focus", () => startRoutePicking(role));
+    input.addEventListener("input", () => {
+      clearTimeout(timer);
+      const text = input.value.trim();
+      if (text.length < 2) {
+        list.innerHTML = "";
+        return;
+      }
+      timer = setTimeout(async () => {
+        const mySeq = ++seq;
+        const items = await apiRoutePointSearch(text);
+        if (mySeq !== seq) return; // a newer keystroke's request already landed
+        if (!items.length) {
+          list.innerHTML = '<div class="map-route-search-empty">Ничего не найдено</div>';
+          return;
+        }
+        list.innerHTML = items
+          .slice(0, 8)
+          .map(
+            (it, i) => `<button type="button" class="map-route-search-item" data-i="${i}">
+              <span class="map-route-search-item__name">${esc(it.name)}</span>${
+                it.subtitle && it.subtitle !== it.name ? `<span class="map-route-search-item__sub">${esc(it.subtitle)}</span>` : ""
+              }
+            </button>`
+          )
+          .join("");
+        list.querySelectorAll("[data-i]").forEach((btn) => {
+          btn.addEventListener("click", () => {
+            const item = items[parseInt(btn.dataset.i, 10)];
+            setRoutePoint(role, { lat: item.lat, lng: item.lng, name: item.name });
+          });
+        });
+      }, 250);
+    });
+  }
+
+  // 2026-09-16: used to also call renderRoutePanel() to swap the pick
+  // button's own label — now that arming happens on focus (bindPointSearch
+  // above), a full re-render here would immediately steal back the focus
+  // the person just gave the input. updatePickingHighlight() below updates
+  // the already-rendered slots in place instead.
+  function startRoutePicking(role) {
+    routePicking = role;
+    map.getCanvas().style.cursor = "crosshair";
+    updatePickingHighlight();
+  }
+  function stopRoutePicking() {
+    map.getCanvas().style.cursor = "";
+    routePicking = null;
+    hideRoutePickLabel();
+  }
+  // Keeps each unfilled slot's ".is-picking" class and hint wording in sync
+  // with whichever role the next map click would fill right now — either
+  // explicitly armed (routePicking, via startRoutePicking) or implicitly
+  // (autoRoutePickRole, once exactly one side is already set). Called
+  // whenever that state changes WITHOUT a full renderRoutePanel() (focus,
+  // mousemove-driven checks would be overkill there) so an input never
+  // loses focus just because the person clicked into it.
+  function updatePickingHighlight() {
+    const active = routePicking || autoRoutePickRole();
+    els.results.querySelectorAll(".map-route-point-slot[data-role]").forEach((slotEl) => {
+      const role = slotEl.dataset.role;
+      const isActive = role === active;
+      slotEl.classList.toggle("is-picking", isActive);
+      const roleWord = role === "from" ? "от" : "до";
+      const hint = slotEl.querySelector(".map-route-point-slot__hint");
+      if (hint) {
+        hint.textContent = isActive ? `Кликните на карте, чтобы указать точку «${roleWord}»` : `Кликните на карте или введите в поиске точку «${roleWord}»`;
+      }
+    });
+  }
+  // 2026-09-16 (live feedback): once one of the two points is filled, the
+  // other slot is implicitly "next to pick" — a plain map click sets it
+  // directly, without first pressing that slot's own "Выбрать на карте"
+  // button. Only kicks in when exactly one side is filled: with both empty,
+  // a stray click while just browsing the freshly-opened panel shouldn't
+  // silently claim "от" the person didn't ask to set yet, and an explicit
+  // "Выбрать на карте" press (routePicking) still works the same as before
+  // for re-picking either side once both are set.
+  function autoRoutePickRole() {
+    if (!routeState) return null;
+    if (routeState.from && !routeState.to) return "to";
+    if (!routeState.from && routeState.to) return "from";
+    return null;
+  }
+  // Called both from map click-picking (handleRoutePick below) and from a
+  // geocode search result — either way, setting the SECOND point triggers
+  // the actual /api/route-plan call.
+  function setRoutePoint(role, point) {
+    if (!routeState) routeState = { from: null, to: null };
+    routeState[role] = point;
+    stopRoutePicking();
+    renderRoutePanel();
+    // Give the map an immediate crosshair cue for the now-implicit "pick the
+    // other point" state, rather than waiting for the next mousemove to
+    // notice it via processHover's own autoRoutePickRole() check.
+    if (autoRoutePickRole()) map.getCanvas().style.cursor = "crosshair";
+    if (routeState.from && routeState.to) fetchAndRenderRoute();
+  }
+  function clearRoutePoint(role) {
+    if (!routeState) routeState = { from: null, to: null };
+    routeState[role] = null;
+    routeItineraries = [];
+    routeError = null;
+    setRouteGeometry(null);
+    stopRoutePicking();
+    renderRoutePanel();
+  }
+  function swapRoutePoints() {
+    if (!routeState) return;
+    const tmp = routeState.from;
+    routeState.from = routeState.to;
+    routeState.to = tmp;
+    renderRoutePanel();
+    if (routeState.from && routeState.to) fetchAndRenderRoute();
+  }
+  // The next map click (any layer, anywhere — this is checked first thing
+  // in map.on("click") below, ahead of the normal hit-test/object-card
+  // flow) fills whichever slot is being picked. apiHitTest gives it a real
+  // name when the click happens to land on a building/stop/company already
+  // known to the map, same lookup the plain click handler itself uses;
+  // otherwise it's just "Точка на карте", same fallback renderSelected uses
+  // for a bare map click.
+  async function handleRoutePick(lat, lng, roleOverride) {
+    const role = roleOverride || routePicking;
+    if (!role) return;
+    let name = "Точка на карте";
+    try {
+      const data = await apiHitTest(lat.toFixed(6), lng.toFixed(6));
+      const feature = data.features && data.features[0];
+      if (feature && feature.properties && feature.properties.name) name = feature.properties.name;
+    } catch (e) {
+      /* best-effort naming only -- the point itself is still usable */
+    }
+    setRoutePoint(role, { lat, lng, name });
+  }
+
+  async function fetchAndRenderRoute() {
+    if (!routeState || !routeState.from || !routeState.to) return;
+    const seq = ++routeReqSeq;
+    routeLoading = true;
+    routeError = null;
+    renderRoutePanel();
+    let data;
+    try {
+      data = await apiRoutePlan(routeState.from, routeState.to);
+    } catch (err) {
+      if (seq !== routeReqSeq) return; // superseded by a newer request
+      routeLoading = false;
+      routeItineraries = [];
+      routeError = "Не удалось построить маршрут. Возможно, маршрутный сервис сейчас недоступен.";
+      renderRoutePanel();
+      return;
+    }
+    if (seq !== routeReqSeq) return;
+    routeLoading = false;
+    routeItineraries = data.itineraries || [];
+    routeSelectedItin = 0;
+    renderRoutePanel();
+    setRouteGeometry(routeItineraries[0] || null);
+  }
+
+  function openRoutePanel(anchor) {
+    setSelectedGeometry([]);
+    routeState = { from: null, to: null };
+    routeItineraries = [];
+    routeError = null;
+    stopRoutePicking();
+    if (anchor && (anchor.role === "from" || anchor.role === "to")) {
+      routeState[anchor.role] = { lat: anchor.lat, lng: anchor.lng, name: anchor.name || "Точка на карте" };
+    }
+    renderRoutePanel();
+  }
+  els.routeOpen.addEventListener("click", () => openRoutePanel(null));
+
+  // ---- resolving a map click on an AREA layer with no per-feature DB id
+  // in the vector tile itself (place-labels-hit's point only carries a bare
+  // `name`; landuse's fill carries OSM tags, not our own primary key) ------
+  // 2026-09-16 (live report, screenshot 1 — clicking a PARK on the map hit
+  // a tile-native "Страница появится позже" placeholder instead of the
+  // real /parks/ integration built the same wave this session started
+  // with): `place-labels-hit` (quarters — the "district" concept, see
+  // TYPE_LABEL's own comment on why that's distinct from "raion") and
+  // `landuse`/`water` (parks/gardens/forests/protected areas, plus plenty
+  // of area with no page at all — residential/commercial/water/...) used to
+  // both just show a small native maplibregl.Popup with the bare OSM name,
+  // regardless of whether a real page/API integration existed for that spot
+  // by now. `/api/area-at` (server/src/routes/coord.js) does the actual
+  // point-in-polygon lookup against the real boundary geometry (districts
+  // via areasDirectory.findContaining, parks via parksDirectory) — this
+  // resolves the click to that object's real id and opens it through the
+  // exact same renderSelected() card every other object type now uses,
+  // anchored to the ACTUAL point clicked (not the polygon's centroid — see
+  // renderSelected's own comment on why that matters for a large object).
+  async function fetchAreaAt(kind, lat, lng) {
+    const res = await fetch(`/api/area-at?lat=${lat}&lng=${lng}&kind=${kind}`);
+    return res.json();
+  }
+  async function renderResolvedArea(type, id, lat, lng, fallbackName) {
+    const obj = id != null ? await apiObject(type, id) : null;
+    if (obj) {
+      const item = { type, id: obj.id, name: obj.name, subtitle: "" };
+      renderSelected(item, obj, { lat, lng });
+      if (obj.geometry) setSelectedGeometry([{ type: "Feature", geometry: obj.geometry, properties: {} }]);
+      // Deliberately no fitBounds/flyTo here (unlike choose()'s district/
+      // park branch) — the person already clicked exactly where they wanted
+      // to look; fitting the whole polygon's bounds would zoom OUT from the
+      // point of interest instead of keeping it in view.
+      return true;
+    }
+    // No DB row under this point (a resolution miss, or the point is inside
+    // a landuse category this site has no page for at all — residential,
+    // water, ...) — still the SAME card shape, just without a "Подробнее"
+    // link, so this dead end reads as "consistent, but nothing more to say"
+    // rather than a smaller, different popup.
+    renderSelected({ type, id: null, name: fallbackName || "Точка на карте", subtitle: "" }, null, { lat, lng });
+    return false;
+  }
+  async function resolveAreaClick(kind, name, lat, lng) {
+    const data = await fetchAreaAt(kind, lat, lng);
+    if (data.found) return renderResolvedArea(data.type, data.id, lat, lng, name);
+    renderSelected({ type: kind, id: null, name: name || "Точка на карте", subtitle: "" }, null, { lat, lng });
+  }
+
+  // ---- hover: highlight + cursor on buildings/streets/quarters/stops/search results --------------
+  // Buildings, street lines, quarter names, stops, and search result
+  // markers/clusters all get the same two things on hover: (1) a highlight
+  // (feature-state on the vector layers; the "hover" geojson source for the
+  // three point layers with no stable tile id — stops, search points,
+  // search clusters), (2) a pointer cursor instead of the default grab.
+  // 2026-09-15 (live report, "Попап, который появляется при долгом
+  // наведении, теперь лишний"): a THIRD thing — a small popup revealed after
+  // the pointer dwelled on one object for a while, with a "Подробнее"/
+  // "Открыть страницу" action — used to also happen here. Removed: a plain
+  // click on the exact same hovered object (map.on("click") below) now opens
+  // the real "Объект на карте" card (or the object's own page, for the types
+  // that have one) immediately, for every object type this covers, so the
+  // dwell popup only ever repeated that after an extra wait. `claude/
+  // hover-click-rules.md` (project notes) documents the resulting per-type
+  // rules (highlight / cursor / click) and should stay in sync with this.
   // "place-labels-hit"/"roads-hit", not "place-labels"/"roads"/
   // "road-labels-N" themselves: a quarter name is a short line of text at a
   // point, and a street's rendered line is only 0.6-4.5px wide — hovering/
@@ -853,7 +1748,29 @@
   // server/src/routes/coord.js queries the whole `stops` table regardless
   // of stop_type, so subway/rail rows resolve exactly like bus/tram ones) —
   // this was purely a missing client-side wire-up.
-  const HOVER_LAYERS = ["buildings", "roads-hit", "place-labels-hit", "overlay-stations", "overlay-stops", "overlay-stops-badge", "search-points", "search-clusters"];
+  // "landuse"/"water" added 2026-09-15 (map-display point 5, "подтянуть
+  // названия парков/водоёмов + сделать кликабельными") — unlike every other
+  // entry here, these are the real, always-drawn fill layers themselves
+  // (map-style.js), not a separate invisible "-hit" proxy: a park/lake
+  // polygon is already generously large as a hit target, so it doesn't need
+  // the widening trick roads-hit/place-labels-hit exist for. Named features
+  // only in practice (processHover below drops unnamed ones before they
+  // ever reach handleHoverFeature) — an unnamed generic residential/
+  // industrial landuse block isn't something to hover/click.
+  const HOVER_LAYERS = ["buildings", "roads-hit", "place-labels-hit", "landuse", "water", "overlay-stations", "overlay-stops", "overlay-stops-badge", "search-points", "search-clusters"];
+  // 2026-09-16 (live report, third issue — "клик мимо объекта на малых
+  // масштабах должен отдавать координаты, а не район/парк"): place-labels-
+  // hit (quarters, minzoom 10 in map-style.js) and landuse/water (park/
+  // water fills, no minzoom at all -- rendered from the map's own minimum
+  // zoom) are both clickable at a fully-zoomed-out, whole-city view, where
+  // a single polygon can cover most of the visible map -- resolving a
+  // click there into "you clicked inside district X" isn't useful, the
+  // person just wants to know where they clicked. 13 matches this site's
+  // own existing zoom tiers (map-style.js: buildings render from 13/14,
+  // residential streets' minzoomFull is 13) -- the zoom the map already
+  // treats as "committed to neighbourhood detail" elsewhere, reused here
+  // rather than inventing a second threshold.
+  const AREA_RESOLVE_MINZOOM = 13;
   // 2026-09-08: point layers among the above (station/stop/search-result
   // badges, as opposed to buildings/roads-hit/place-labels-hit's areas and
   // lines) can legitimately sit a few metres from ANOTHER point layer's
@@ -947,20 +1864,27 @@
     if (stopType === "airport") return { iconName: "stop-triangle-hover", kind: "stopDot" };
     return { iconName: "stop-dot-hover", kind: "stopDot" };
   }
-  // How long the pointer has to rest on one object before its popup
-  // appears, and (symmetrically) how long it has to rest on a DIFFERENT
-  // object before that popup is replaced — see the big comment above
-  // `handleHoverFeature` for the reasoning. Not applied to the highlight or
-  // the cursor, which stay instant: this is specifically about not
-  // flashing a popup for every object the pointer merely passes over while
-  // navigating the map.
-  const HOVER_DWELL_MS = 5000;
+  // 2026-09-15 (live report, "Попап, который появляется при долгом
+  // наведении, теперь лишний"): the dwell-triggered hover popup (this
+  // constant, `confirmedPopupKey`/`hoverPopup`/`showPopupContent`/
+  // `revealPopup`/`bindHoverAction`/`confirmPopup` — all removed below) used
+  // to be the only way to reach an object's details from the map without
+  // first going through the search box. Now that a plain CLICK on any
+  // hoverable object opens the same (or a strictly richer — see the new
+  // "Открыть страницу" link, claude/implementation-log.md) "Объект на
+  // карте" card directly (map.on("click") below), the popup only ever
+  // duplicated what one more click already does instantly, with an extra
+  // 5s wait in front of it. Removed everywhere (buildings, stops, roads,
+  // quarters, landuse/water, search markers) rather than only for the
+  // types with a real card, since every one of them already has an
+  // equivalent instant click action. The instant part — highlight + cursor
+  // change on hover — is untouched, see `handleHoverFeature`/
+  // `setHighlightForFeature` below.
 
   let hoverFrame = null;
   let pendingHoverPoint = null;
   let pendingHoverLngLat = null;
   let hoverKey = null; // whatever's directly under the pointer right now (drives highlight + cursor, instantly)
-  let dwellTimer = null; // counts down to revealing/switching the popup for `hoverKey`
   // Grace period before a "nothing under the cursor" frame actually clears
   // the highlight (2026-09-05, "Витиня продолжает сильно мельтешить" —
   // still flickering after the width-based `roads-hit` fix above). Root
@@ -990,10 +1914,7 @@
   // for the whole simulated hover.
   const HOVER_MISS_GRACE_MS = 150;
   let hoverMissTimer = null;
-  let confirmedPopupKey = null; // the object whose popup is currently on screen, if any
-  let hoverSeq = 0;
   let activeHighlight = null; // { kind: "building"|"road"|"place", sourceLayer, ids } | { kind: "stop" } | null
-  const hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: "map-hover-popup-wrap", offset: 10 });
 
   function setHoverGeometry(features) {
     const src = map.getSource("hover");
@@ -1016,8 +1937,8 @@
   const HOVER_LABEL_LAYERS = ["hover-road-label", "hover-quarter-label"];
   // Shows the enlarged stand-in label with a soft grow-in instead of an
   // instant pop (2026-09-05, "плавные реакции" feedback) — the same
-  // "set the end state one animation frame late" trick `revealPopup` uses
-  // for the popup's own fade-in, just on a paint property instead of a DOM
+  // "set the end state one animation frame late" trick the (since-removed)
+  // hover popup's own fade-in used, just on a paint property instead of a DOM
   // class. A GeoJSON `setData` swap has no fade of its own (unlike the real
   // label's `text-opacity`, which transitions smoothly via feature-state —
   // see map-style.js), so without this the stand-in would always appear at
@@ -1035,10 +1956,9 @@
 
   // Turns off whatever's currently highlighted via `feature-state` (or, for
   // stops/search points/clusters, the geojson source) — the counterpart to
-  // `setHighlightForFeature` below. Kept as its own step (not folded into
-  // clearing the popup) since the highlight is instant and the popup is
-  // dwell-gated — they're cleared on different schedules, see
-  // `clearHighlightOnly` vs `clearHover`.
+  // `setHighlightForFeature` below. Kept as its own step (used by
+  // `clearHighlightOnly`, which is the only teardown left now that the hover
+  // popup is gone — see the big comment above `hoverFrame` et al.).
   function clearHighlight() {
     if (!activeHighlight) return;
     if (activeHighlight.kind === "point") {
@@ -1153,6 +2073,15 @@
       map.setFeatureState({ source: "base", sourceLayer: "place", id: f.id }, { hover: true });
       activeHighlight = { kind: "place", sourceLayer: "place", ids: [f.id] };
       showHoverLabel([{ type: "Feature", geometry: f.geometry, properties: { kind: "quarter", name: props.name } }]);
+    } else if ((layerId === "landuse" || layerId === "water") && f.id != null) {
+      // 2026-09-15 (map-display point 5) — same feature-state mechanism as
+      // buildings/quarters, just driving the "fill-outline-color" hover
+      // case in map-style.js instead of a darker fill or a label swap: see
+      // that layer's own comment for why an outline reads clearly against
+      // every landuse fill color without needing a per-category hover
+      // color table the way buildings' BUILDING_FILL_EXPR has.
+      map.setFeatureState({ source: "base", sourceLayer: layerId, id: f.id }, { hover: true });
+      activeHighlight = { kind: layerId, sourceLayer: layerId, ids: [f.id] };
     } else if (layerId === "roads-hit") {
       const matches = props.name
         ? map.queryRenderedFeatures(undefined, { layers: ["roads"], filter: ["==", ["get", "name"], props.name] })
@@ -1211,99 +2140,19 @@
     }
   }
 
-  // Instant part of leaving an object: drop the highlight, reset the
-  // cursor, and stop counting down toward showing/switching a popup for it.
-  // Deliberately does NOT touch an already-CONFIRMED popup — see
-  // `clearHover` below for why that's a separate, rarer action.
+  // Drops the highlight and resets the cursor/dwell-miss state — the only
+  // teardown needed now that hovering no longer confirms a popup (2026-09-15
+  // removal, see the big comment above `hoverFrame` et al.). Used both for a
+  // momentary gap mid-pan (`hoverMissTimer`, below) and for the pointer
+  // actually leaving the map (`mouseout`, below) — nothing left to treat
+  // differently between those two cases now that there's no confirmed popup
+  // to preserve through a brief empty patch.
   function clearHighlightOnly() {
-    clearTimeout(dwellTimer);
-    dwellTimer = null;
     clearTimeout(hoverMissTimer);
     hoverMissTimer = null;
     clearHighlight();
     map.getCanvas().style.cursor = "";
     hoverKey = null;
-  }
-
-  // Full teardown, including an already-confirmed popup — used only when
-  // the pointer actually leaves the map (not just a momentary gap between
-  // two hoverable features while crossing dense building tiling) or when a
-  // click supersedes it. A brief empty patch mid-pan is common enough
-  // (small gaps between buildings, gutters between road segments) that
-  // hiding a confirmed popup for it would recreate the exact flicker the
-  // dwell delay exists to avoid — so passing through empty space alone
-  // only calls `clearHighlightOnly`, not this.
-  function clearHover() {
-    clearHighlightOnly();
-    if (confirmedPopupKey !== null) {
-      confirmedPopupKey = null;
-      hoverPopup.remove();
-    }
-  }
-
-  // The popup renders offset from the actual hover point (`offset: 10`
-  // above), so reaching its "Подробнее" button means moving the mouse OFF
-  // the map canvas and onto the popup's own DOM element — which, because it
-  // visually overlaps the canvas, makes the canvas fire its native
-  // `mouseout` the instant the pointer crosses onto it, same as leaving the
-  // map entirely. `pointInPopupRect` lets both the mousemove and mouseout
-  // handlers recognize "the pointer is over the currently-open popup" and
-  // leave everything alone in that case — the popup's own `mouseleave`
-  // (bound below) is what actually closes it once the pointer leaves that
-  // rect without having landed back on a hoverable map feature.
-  function pointInPopupRect(clientX, clientY) {
-    if (confirmedPopupKey === null) return false;
-    const content = hoverPopup.getElement() && hoverPopup.getElement().querySelector(".maplibregl-popup-content");
-    if (!content) return false;
-    const r = content.getBoundingClientRect();
-    return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
-  }
-  // MapLibre's `setHTML`/`setDOMContent` replaces the content element
-  // outright rather than just its innerHTML, so this has to run again
-  // after every setHTML call, not just the first — guarded by a marker on
-  // the element itself (not a module-level flag) so it's safe to call as
-  // often as needed without double-binding the same node.
-  function ensurePopupListeners() {
-    const content = hoverPopup.getElement() && hoverPopup.getElement().querySelector(".maplibregl-popup-content");
-    if (!content || content.__hoverBound) return;
-    content.__hoverBound = true;
-    content.addEventListener("mouseleave", clearHover);
-  }
-
-  function hoverPopupHtml(title, subtitle, action) {
-    return `<div class="map-hover-popup">
-      <strong>${esc(title)}</strong>
-      <span>${esc(subtitle || "")}</span>
-      ${action || ""}
-    </div>`;
-  }
-
-  // Shows the popup with a fade-in (`.is-visible`, transitioned in CSS) —
-  // the "плавно проявляется" part of the request. Only the initial reveal
-  // fades; a later `setHTML` on the same popup instance (e.g. a building's
-  // "Загрузка…" placeholder resolving) just swaps content in place.
-  function revealPopup(lngLat, html) {
-    hoverPopup.setLngLat(lngLat).setHTML(html).addTo(map);
-    ensurePopupListeners();
-    const el = hoverPopup.getElement();
-    if (el) requestAnimationFrame(() => el.classList.add("is-visible"));
-  }
-
-  // Binds the click on whatever "action" HTML `hoverPopupHtml` was given —
-  // done as a separate step (rather than inline in the HTML string) because
-  // popup content is plain markup; MapLibre doesn't wire up handlers for
-  // strings passed to setHTML.
-  function bindHoverAction(kind, payload) {
-    const el = hoverPopup.getElement();
-    const btn = el && el.querySelector(".js-hover-more");
-    if (!btn) return;
-    btn.addEventListener("click", () => {
-      confirmedPopupKey = null;
-      hoverPopup.remove();
-      if (kind === "object") openObjectDetails(payload);
-      else if (kind === "street") resolveStreetClick(payload);
-      else if (kind === "result") choose(payload.index);
-    });
   }
 
   // The road hover popup's "Найти на карте →": used to just drop the bare
@@ -1324,18 +2173,44 @@
       return runSearch();
     }
     const subtitle = resolved.district ? `${TYPE_LABEL.street} · ${resolved.district}` : TYPE_LABEL.street || "";
-    loadStreetHouses({ type: "street", id: resolved.id, name: resolved.name, subtitle });
+    // The actual clicked point, not the street's own geometry fallback —
+    // see loadStreetHouses's own comment on why this matters for a large
+    // linear object the same way it does for a park/district polygon.
+    loadStreetHouses({ type: "street", id: resolved.id, name: resolved.name, subtitle }, { lat, lng });
+  }
+
+  // Only carries real information (an address the caller doesn't already
+  // show as its own name, or a company's rubric/street) — see renderSelected
+  // point 3 comment for why a bare repeat of TYPE_LABEL used to be here
+  // instead, on both this function's `item` and selectFromUrl's below.
+  function addressSubtitle(obj) {
+    const addr = [obj.addr_street, obj.housenumber].filter(Boolean).join(" ");
+    return obj.name && addr && addr !== obj.name ? addr : "";
+  }
+  function companySubtitle(obj) {
+    const addr = [obj.addr_street, obj.housenumber].filter(Boolean).join(" ");
+    return [obj.rubric, addr].filter(Boolean).join(" · ");
   }
 
   // The hover popup's "Подробнее" for a real object (address/company/stop —
   // whatever /api/hit-test resolved the point to): opens the exact same
   // detail view `choose()` renders for a search result, since that's the
   // closest thing to "the object's page" that exists today.
-  async function openObjectDetails({ type, id, name }) {
-    const item = { type, id, name, subtitle: TYPE_LABEL[type] || "" };
+  async function openObjectDetails({ type, id, name, lat, lng }) {
+    const item = { type, id, name, subtitle: "" };
+    // `lat`/`lng`, when given, is the point actually clicked (every call
+    // site below now passes `e.lngLat` through) — used as the card's
+    // coordinates/route anchor for a point object too, falling back to the
+    // fetched object's own lat/lon only when no click point was supplied
+    // (there is none today, but keeps this safe for a future caller).
+    const clickCoords = lat != null ? { lat, lng } : null;
     if (type === "address") {
       const obj = await apiObject("address", id);
-      renderSelected(item, obj);
+      if (obj) {
+        item.name = obj.name || item.name;
+        item.subtitle = addressSubtitle(obj);
+      }
+      renderSelected(item, obj, clickCoords || (obj && obj.lat != null ? { lat: obj.lat, lng: obj.lon } : null));
       if (obj && obj.geometry) {
         setSelectedGeometry([{ type: "Feature", geometry: obj.geometry, properties: {} }]);
         const coords = flattenCoords(obj.geometry);
@@ -1343,7 +2218,7 @@
       }
       return;
     }
-    renderSelected(item, null);
+    renderSelected(item, null, clickCoords);
     if (type === "company") {
       const obj = await apiObject("company", id);
       if (obj) appendCompanyDetails(obj);
@@ -1364,119 +2239,91 @@
     }
   }
 
-  // Builds and reveals the popup for whatever just finished its dwell —
-  // this is the exact per-layer content logic the previous (instant)
-  // version of this feature used, just moved behind the delay instead of
-  // running on every hover change. `key` is re-checked before touching
-  // anything async, in case the pointer moved on while a network request
-  // (the building/stop hit-test) was in flight.
-  function showPopupContent(key, layerId, props, lngLat) {
-    // A search result marker already carries everything it needs (`results`
-    // has the full item — name/type/id) from the search that put it on the
-    // map, so unlike buildings/stops this needs no /api/hit-test round trip.
-    // "Подробнее" reuses `choose()`, the exact same call the matching list
-    // row's click makes — same card, same fitBounds/flyTo.
-    if (layerId === "search-points") {
-      const item = results[props.index];
-      if (!item) return;
-      // 2026-09-09 (claude/search-results-plan.md): "Открыть страницу"
-      // replaces "Подробнее" here and is a REAL link (new tab) to the
-      // object's own page (search.js's `href`) rather than another way to
-      // trigger the same in-panel card a plain click on the marker/row
-      // already opens. Falls back to the old button when this particular
-      // result has no page yet (href is null for a few types this dataset
-      // has no static page for, e.g. an "airport" terminal).
-      const action = item.href
-        ? `<a class="map-hover-popup__link" href="${esc(item.href)}" target="_blank" rel="noopener">Открыть страницу →</a>`
-        : '<button class="map-hover-popup__link js-hover-more" type="button">Подробнее →</button>';
-      revealPopup(lngLat, hoverPopupHtml(item.name, item.subtitle || TYPE_LABEL[item.type] || "", action));
-      if (!item.href) bindHoverAction("result", { index: props.index });
+  // 2026-09-15 live report ("при клике со страницы адреса, на карте должен
+  // вызываться необходимый объект. Сейчас кнопка развернуть, просто открывает
+  // большую карту"): entry point for the new `?sel=type:id` deep link
+  // (htmlPage.js's mapSelectHref/mapSelectLink — today only the house page's
+  // "Развернуть"/"Открыть на карте" use it, see routes/pages.js) — selects
+  // the exact object via the SAME `/api/object/:type/:id` + render/fit flow
+  // `choose()` already uses for a clicked search-result row, instead of the
+  // old `?q=`-based text re-search (which can now land on a different row
+  // than intended once search results bubble/group — Проблема B). Reuses
+  // `openObjectDetails` for the types it already covers (address/company/
+  // stop/metro/rail/terminal); street/district/settlement need their own
+  // handling below since `openObjectDetails` never had to cover them (no
+  // hover-popup "Подробнее" exists for those object types today).
+  async function selectFromUrl(type, id) {
+    if (type === "district" || type === "settlement" || type === "raion" || type === "park") {
+      const obj = await apiObject(type, id);
+      if (!obj) return;
+      const item = { type, id: obj.id, name: obj.name, subtitle: "" };
+      renderSelected(item, obj, obj.lat != null ? { lat: obj.lat, lng: obj.lon } : null);
+      if (obj.geometry) {
+        setSelectedGeometry([{ type: "Feature", geometry: obj.geometry, properties: {} }]);
+        const coords = flattenCoords(obj.geometry);
+        if (coords.length) fitBoundsCoords(coords);
+      }
       return;
     }
-    // A cluster isn't one named object — there's nothing a popup could
-    // usefully say beyond the count the circle's own size already
-    // communicates (see map-style.js) — so it only ever gets the instant
-    // highlight/cursor, never a popup. Dwell timer still runs (harmlessly:
-    // `confirmPopup` calls this, this returns without opening anything).
-    if (layerId === "search-clusters") return;
-
-    // "overlay-stations" (metro/rail) carries name/id/type directly in its
-    // own GeoJSON (see pipeline/dedup_stations.py) — unlike buildings/
-    // ordinary stops below, no /api/hit-test round trip needed, and
-    // deliberately so: hit-test resolves by nearest-point-within-~20m
-    // (coord.js's M2DEG2), but several deduped stations' own centroid sits
-    // 40-90m from the nearest raw stop row it was merged from (long
-    // platforms) — well past that radius, so hit-test would legitimately
-    // come back empty for exactly the points this layer draws.
-    if (layerId === "overlay-stations") {
-      const action = '<button class="map-hover-popup__link js-hover-more" type="button">Подробнее →</button>';
-      revealPopup(lngLat, hoverPopupHtml(props.name, TYPE_LABEL[props.type] || "", action));
-      bindHoverAction("object", { type: props.type, id: props.id, name: props.name });
+    if (type === "street") {
+      const obj = await apiObject("street", id);
+      if (!obj) return;
+      return loadStreetHouses({ type: "street", id: obj.id, name: obj.name, subtitle: TYPE_LABEL.street || "" });
+    }
+    if (type === "address") {
+      const obj = await apiObject("address", id);
+      if (!obj) return;
+      // Same fallback shape as server/src/routes/search.js's own
+      // `fallbackName` — a plain house with no `name` tag of its own is
+      // shown as "<street> <number>", not blank. `obj.addr_street` already
+      // comes back designation-normalized (object.js runs it through
+      // `withDesignation` itself), so no extra work needed here.
+      const name = obj.name || [obj.addr_street, obj.housenumber].filter(Boolean).join(" ");
+      const item = { type: "address", id: obj.id, name, subtitle: addressSubtitle(obj) };
+      renderSelected(item, obj, obj.lat != null ? { lat: obj.lat, lng: obj.lon } : null);
+      if (obj.geometry) {
+        setSelectedGeometry([{ type: "Feature", geometry: obj.geometry, properties: {} }]);
+        const coords = flattenCoords(obj.geometry);
+        if (coords.length) fitBoundsCoords(coords);
+      }
       return;
     }
-
-    // Buildings and ordinary stops carry no usable name in the vector tile
-    // itself — deliberately, see pipeline/sofia-schema.yml — so their
-    // popup content comes from the same /api/hit-test lookup the "click on
-    // empty map spot" handler above already uses, keyed by the hover point.
-    if (layerId === "buildings" || layerId === "overlay-stops" || layerId === "overlay-stops-badge") {
-      const seq = ++hoverSeq;
-      revealPopup(lngLat, hoverPopupHtml("Загрузка…", ""));
-      apiHitTest(lngLat.lat.toFixed(6), lngLat.lng.toFixed(6)).then((data) => {
-        if (seq !== hoverSeq || key !== confirmedPopupKey) return; // popup moved on before this resolved
-        const feature = data.features && data.features[0];
-        if (!feature) {
-          hoverPopup.setHTML(hoverPopupHtml("Объект не найден", ""));
-          ensurePopupListeners(); // setHTML replaced the content element — rebind
-          return;
-        }
-        const p = feature.properties;
-        const action = '<button class="map-hover-popup__link js-hover-more" type="button">Подробнее →</button>';
-        hoverPopup.setHTML(hoverPopupHtml(p.name, TYPE_LABEL[p.type] || "", action));
-        ensurePopupListeners(); // setHTML replaced the content element — rebind
-        bindHoverAction("object", { type: p.type, id: p.id, name: p.name });
-      });
+    if (type === "company") {
+      const obj = await apiObject("company", id);
+      if (!obj) return;
+      const item = { type: "company", id: obj.id, name: obj.name, subtitle: companySubtitle(obj) };
+      renderSelected(item, obj, obj.lat != null ? { lat: obj.lat, lng: obj.lon } : null);
+      if (obj.lat != null && obj.lon != null) {
+        setSelectedGeometry([{ type: "Feature", geometry: { type: "Point", coordinates: [obj.lon, obj.lat] }, properties: {} }]);
+        flyTo(obj.lat, obj.lon, 17);
+      }
+      appendCompanyDetails(obj);
       return;
     }
-
-    if (layerId === "place-labels-hit") {
-      revealPopup(lngLat, hoverPopupHtml(props.name, "Квартал / жилой комплекс", '<span class="map-hover-popup__soon">Страница появится позже</span>'));
-      return;
+    if (type === "stop" || type === "metro" || type === "rail" || type === "terminal") {
+      // Same table-collapsing note as openObjectDetails above: /api/object
+      // only knows "stop" — metro/rail/terminal are all the same `stops`
+      // table row, just a nicer TYPE_LABEL for display.
+      const obj = await apiObject("stop", id);
+      if (!obj) return;
+      const item = { type, id: obj.id, name: obj.name, subtitle: "" };
+      renderSelected(item, null, obj.lat != null ? { lat: obj.lat, lng: obj.lon } : null);
+      if (obj.lat != null && obj.lon != null) {
+        setSelectedGeometry([{ type: "Feature", geometry: { type: "Point", coordinates: [obj.lon, obj.lat] }, properties: {} }]);
+        flyTo(obj.lat, obj.lon, 17);
+      }
+      appendStopRoutes(obj);
     }
-
-    // Everything else reaching this point is "roads-hit" (the invisible
-    // wide hit proxy over the transportation source-layer — see
-    // pipeline/sofia-schema.yml for its highway/name properties), so this
-    // one branch covers every street regardless of class. Unnamed ways
-    // (footways, service lanes — the untagged lowest tier) fall back to a
-    // generic kind instead of a confusing "street with no name", and skip
-    // the search action since there's no name to search for.
-    const kind = HIGHWAY_KIND[props.highway] || "Дорога";
-    const title = props.name || kind;
-    const subtitle = props.name ? kind : "";
-    const action = props.name ? '<button class="map-hover-popup__link js-hover-more" type="button">Найти на карте →</button>' : "";
-    revealPopup(lngLat, hoverPopupHtml(title, subtitle, action));
-    if (props.name) bindHoverAction("street", { name: props.name, lat: lngLat.lat, lng: lngLat.lng });
-  }
-
-  // Fires once `key` has been continuously hovered for HOVER_DWELL_MS.
-  function confirmPopup(key, layerId, props, lngLat) {
-    if (hoverKey !== key) return; // moved on already — this timer should have been cancelled, but double-check
-    if (confirmedPopupKey !== null) hoverPopup.remove(); // instant swap, no fade-out — only the reveal fades
-    confirmedPopupKey = key;
-    showPopupContent(key, layerId, props, lngLat);
   }
 
   // Highlight + cursor update instantly on every hover change (immediate
-  // feedback that something is interactive); the popup does not — it only
-  // appears after the pointer has rested on the SAME object for
-  // HOVER_DWELL_MS ("долгого удержания курсора… на объекте"), and an
-  // already-visible popup only gets replaced once the pointer has rested
-  // on a DIFFERENT object for that same duration ("скрывается после
-  // аналогичного удержания на другом объекте") — or immediately on a click
-  // (see the click handler below). Without this, merely passing the mouse
-  // over the map while heading somewhere else would flash a popup for
-  // every building/street/quarter along the way.
+  // feedback that something is interactive). Used to also arm a dwell timer
+  // that revealed a small popup after the pointer rested on one object for a
+  // while ("долгого удержания курсора… на объекте") — removed 2026-09-15 (see
+  // the big comment above `hoverFrame` et al.): every layer this covers now
+  // has an equivalent instant click action (map.on("click") below), so the
+  // popup only ever repeated, after a wait, what a click already does right
+  // away.
   function handleHoverFeature(f, lngLat) {
     const layerId = f.layer.id;
     const props = f.properties || {};
@@ -1493,25 +2340,39 @@
 
     if (key === hoverKey) return; // still the same object as last frame — nothing changed
 
-    clearTimeout(dwellTimer);
     clearHighlight();
     hoverKey = key;
     setHighlightForFeature(layerId, f, props);
-
-    if (key === confirmedPopupKey) return; // its popup is already on screen
-    dwellTimer = setTimeout(() => confirmPopup(key, layerId, props, lngLat), HOVER_DWELL_MS);
   }
 
-  function processHover(point, lngLat, clientX, clientY) {
-    if (pointInPopupRect(clientX, clientY)) return; // pointer is over the open popup itself — leave it alone
-    const features = map.queryRenderedFeatures(point, { layers: HOVER_LAYERS });
+  function processHover(point, lngLat) {
+    // While picking a route point (routePicking, see the routing section
+    // above) the cursor is pinned to "crosshair" for the whole map, not just
+    // hover-able features — skip the normal highlight/cursor churn entirely
+    // rather than have this fight startRoutePicking's own cursor setting.
+    if (routePicking) return;
+    // Same idea as the click handler above: with exactly one route point
+    // filled, the map is implicitly in "pick the other one" mode, so it
+    // gets the same crosshair cursor as the explicit routePicking case
+    // instead of the normal per-feature hover highlight/pointer cursor.
+    if (mode === "route" && autoRoutePickRole()) {
+      map.getCanvas().style.cursor = "crosshair";
+      return;
+    }
+    // Unnamed "landuse"/"water" features are dropped right here (2026-09-15,
+    // map-display point 5) rather than filtered further down — most
+    // residential/industrial/commercial landuse polygons and plenty of
+    // small water features carry no OSM `name` tag at all, and those
+    // shouldn't get a hover cursor/highlight for an object with nothing to
+    // show. Every other layer here always has SOME identity worth hovering.
+    const features = map.queryRenderedFeatures(point, { layers: HOVER_LAYERS }).filter(
+      (f) => (f.layer.id !== "landuse" && f.layer.id !== "water") || (f.properties && f.properties.name)
+    );
     if (!features.length) {
       // Passing through empty space (a gap between buildings, a gutter
       // between road segments) drops the highlight — but not on the very
       // first miss: see HOVER_MISS_GRACE_MS above for why a single missed
-      // frame gets a short grace period instead of clearing instantly, and
-      // `clearHighlightOnly`'s own comment for why this still leaves an
-      // already-confirmed popup alone either way.
+      // frame gets a short grace period instead of clearing instantly.
       if (hoverKey !== null && !hoverMissTimer) {
         hoverMissTimer = setTimeout(() => {
           hoverMissTimer = null;
@@ -1523,78 +2384,133 @@
     handleHoverFeature(pickHoverFeature(features, point), lngLat);
   }
 
+  // 2026-09-16 (live feedback, second issue, "к курсору можно добавить
+  // to/from если реализуемо"): a small label that tracks the raw pointer
+  // position and names which slot the next map click will fill, while the
+  // map is in crosshair mode (explicit routePicking OR the implicit
+  // autoRoutePickRole case). A plain fixed-position <div>, not a MapLibre
+  // Marker/Popup — it needs real screen coordinates, not a map lng/lat, and
+  // must never intercept the click itself (pointer-events: none in CSS).
+  // Lazily created once and reused rather than rebuilt on every frame.
+  let routePickLabelEl = null;
+  function routePickLabel() {
+    if (!routePickLabelEl) {
+      routePickLabelEl = document.createElement("div");
+      routePickLabelEl.className = "map-route-pick-label";
+      document.body.appendChild(routePickLabelEl);
+    }
+    return routePickLabelEl;
+  }
+  function updateRoutePickLabel(clientX, clientY) {
+    const role = mode === "route" ? routePicking || autoRoutePickRole() : null;
+    const el = routePickLabel();
+    if (!role || clientX == null) {
+      el.style.display = "none";
+      return;
+    }
+    el.textContent = role === "from" ? "От" : "До";
+    el.style.left = `${clientX + 16}px`;
+    el.style.top = `${clientY + 14}px`;
+    el.style.display = "block";
+  }
+  function hideRoutePickLabel() {
+    if (routePickLabelEl) routePickLabelEl.style.display = "none";
+  }
+
   // `queryRenderedFeatures` isn't free, so it doesn't run on every
   // `mousemove` pixel — at most one call is queued per animation frame,
   // using the latest pointer position by the time that frame actually
   // runs. That caps the extra per-frame cost to something bounded no
   // matter how fast the mouse moves, which matters most on exactly the
   // "lite"/software-rendered visitors this app already goes out of its way
-  // for elsewhere (map-style.js's detectRenderQuality).
-  let pendingHoverClientX = null;
-  let pendingHoverClientY = null;
+  // for elsewhere (map-style.js's detectRenderQuality). The pick-label
+  // update itself is cheap (no layout read, just two style writes) so it
+  // runs right away rather than waiting on that same animation frame.
   map.on("mousemove", (e) => {
     pendingHoverPoint = e.point;
     pendingHoverLngLat = e.lngLat;
-    pendingHoverClientX = e.originalEvent.clientX;
-    pendingHoverClientY = e.originalEvent.clientY;
+    if (e.originalEvent) updateRoutePickLabel(e.originalEvent.clientX, e.originalEvent.clientY);
     if (hoverFrame) return;
     hoverFrame = requestAnimationFrame(() => {
       hoverFrame = null;
-      processHover(pendingHoverPoint, pendingHoverLngLat, pendingHoverClientX, pendingHoverClientY);
+      processHover(pendingHoverPoint, pendingHoverLngLat);
     });
   });
-  // Skip the clear if the pointer left the canvas heading onto the open
-  // popup itself (see pointInPopupRect above) — otherwise reaching for its
-  // button would tear the popup down before the click ever lands. Unlike a
-  // momentary gap mid-map, actually leaving the canvas IS a full teardown
-  // (clearHover, not clearHighlightOnly) — there's no "another object" to
-  // wait a dwell period for.
-  map.on("mouseout", (e) => {
-    if (pointInPopupRect(e.originalEvent.clientX, e.originalEvent.clientY)) return;
-    clearHover();
+  // Actually leaving the canvas always drops the highlight (2026-09-15: used
+  // to also check whether the pointer was heading onto the open hover popup
+  // itself, via `pointInPopupRect` — removed along with the popup, see the
+  // big comment above `hoverFrame` et al.).
+  map.on("mouseout", () => {
+    clearHighlightOnly();
+    hideRoutePickLabel();
   });
 
   // ---- click on a hovered object / empty map spot -------------------------------------------------
   // Reuses whatever's already hovered rather than re-deriving it from
-  // scratch: since the hover popup sits offset from the cursor (so it
-  // doesn't cover what you're pointing at), reaching its small
-  // "Подробнее"/"Найти на карте" button with the mouse means crossing
-  // whatever's between the two — dense building tiling can make that a
-  // real obstacle course. A plain click on the highlighted object itself,
-  // with the cursor exactly where it already is, does the same action —
-  // no extra mouse travel needed. The popup's own button still works when
-  // it's reachable; this is the always-reachable fallback. A click also
-  // dismisses any confirmed popup outright ("скрывается… по клику"),
-  // whatever it ends up doing next.
+  // scratch — cheaper than re-querying, and matches exactly what the
+  // highlight/cursor already told the person was under the pointer.
+  // (2026-09-15: this used to also tear down a confirmed hover popup first
+  // — removed along with the popup itself, see the big comment above
+  // `hoverFrame` et al.)
   map.on("click", async (e) => {
-    clearTimeout(dwellTimer);
-    if (confirmedPopupKey !== null) {
-      confirmedPopupKey = null;
-      hoverPopup.remove();
+    // Picking a route point (routePicking, see the routing section above)
+    // overrides every other click behaviour on the map — the point clicked
+    // is captured as-is (with a best-effort name via apiHitTest inside
+    // handleRoutePick) instead of opening whatever object card it would
+    // normally resolve to.
+    if (routePicking) {
+      await handleRoutePick(e.lngLat.lat, e.lngLat.lng);
+      return;
+    }
+    if (mode === "route") {
+      const autoRole = autoRoutePickRole();
+      if (autoRole) {
+        await handleRoutePick(e.lngLat.lat, e.lngLat.lng, autoRole);
+        return;
+      }
     }
     const hoverHit = pickHoverFeature(map.queryRenderedFeatures(e.point, { layers: HOVER_LAYERS }), e.point);
     if (hoverHit) {
       const layerId = hoverHit.layer.id;
       const props = hoverHit.properties || {};
-      // Same reasoning as showPopupContent's "overlay-stations" branch
-      // above: this layer's own GeoJSON already carries name/id/type, so
-      // it skips /api/hit-test (whose ~20m match radius several deduped
-      // stations' centroids fall outside of) entirely.
+      // This layer's own GeoJSON already carries name/id/type, so it skips
+      // /api/hit-test (whose ~20m match radius several deduped stations'
+      // centroids fall outside of) entirely.
       if (layerId === "overlay-stations") {
-        openObjectDetails({ type: props.type, id: props.id, name: props.name });
+        openObjectDetails({ type: props.type, id: props.id, name: props.name, lat: e.lngLat.lat, lng: e.lngLat.lng });
         return;
       }
       if (layerId === "buildings" || layerId === "overlay-stops" || layerId === "overlay-stops-badge") {
         const data = await apiHitTest(e.lngLat.lat.toFixed(6), e.lngLat.lng.toFixed(6));
         const feature = data.features && data.features[0];
-        if (feature) openObjectDetails({ type: feature.properties.type, id: feature.properties.id, name: feature.properties.name });
+        if (feature) openObjectDetails({ type: feature.properties.type, id: feature.properties.id, name: feature.properties.name, lat: e.lngLat.lat, lng: e.lngLat.lng });
         return;
       }
-      if (layerId === "place-labels-hit") {
-        new maplibregl.Popup({ closeButton: true })
-          .setLngLat(e.lngLat)
-          .setHTML(`<div class="map-click-popup"><h3>${esc(props.name)}</h3><p>Страница появится позже</p></div>`)
-          .addTo(map);
+      // "place-labels-hit" (quarters) and "landuse"/"water" (park/water
+      // fills) — 2026-09-16, see resolveAreaClick's own comment: used to be
+      // a native popup saying "Страница появится позже" unconditionally
+      // (place-labels-hit), or silently did nothing at all on an unnamed
+      // patch (landuse/water) — both now open the same unified object card
+      // every other type uses. BUT only from AREA_RESOLVE_MINZOOM up: below
+      // it (small-scale overview) a single polygon here can cover most of
+      // the visible map, so resolving "you clicked inside district/park X"
+      // isn't useful — this falls through to exactly the same plain-
+      // coordinate path genuinely empty space always used below (one more
+      // apiHitTest in case a building overlaps by a few px, then the
+      // "Точка на карте" card) instead of guessing at the wrong page.
+      if (layerId === "place-labels-hit" || layerId === "landuse" || layerId === "water") {
+        if (props.name && map.getZoom() >= AREA_RESOLVE_MINZOOM) {
+          resolveAreaClick(layerId === "place-labels-hit" ? "district" : "park", props.name, e.lngLat.lat, e.lngLat.lng);
+          return;
+        }
+        const { lat, lng } = e.lngLat;
+        const data = await apiHitTest(lat.toFixed(6), lng.toFixed(6));
+        const feature = data.features && data.features[0];
+        if (feature) {
+          openObjectDetails({ type: feature.properties.type, id: feature.properties.id, name: feature.properties.name, lat, lng });
+          return;
+        }
+        renderSelected({ type: "point", id: null, name: "Точка на карте", subtitle: "" }, null, { lat, lng });
         return;
       }
       // A search result marker: the exact same action as clicking its row
@@ -1642,18 +2558,56 @@
       }
       return; // unnamed road segment (footway/service/...) — nothing to open
     }
+    // 2026-09-16 (live report — unify the card, not just the layers that
+    // already had a dedicated click branch above): this used to be a native
+    // maplibregl.Popup, the one path left rendering something other than
+    // the object card. `/api/hit-test` only ever checks point-scale features
+    // (buildings, stops, companies), so a click that lands nowhere near one
+    // — but still genuinely inside a park or quarter that has no rendered
+    // HOVER_LAYERS feature at the click point (e.g. below place-labels-hit's
+    // own minzoom) — gets one more chance via the same /api/area-at lookup
+    // resolveAreaClick uses, before finally opening a plain "nothing here"
+    // card instead of a popup.
     const { lat, lng } = e.lngLat;
     const data = await apiHitTest(lat.toFixed(6), lng.toFixed(6));
     const feature = data.features && data.features[0];
-    const html = feature
-      ? `<div class="map-click-popup"><h3>${esc(feature.properties.name)}</h3><p>${esc(TYPE_LABEL[feature.properties.type] || feature.properties.type || "")}</p></div>`
-      : `<div class="map-click-popup"><h3>Здесь объект не найден</h3><p>${lat.toFixed(5)}, ${lng.toFixed(5)}</p></div>`;
-    new maplibregl.Popup({ closeButton: true }).setLngLat(e.lngLat).setHTML(html).addTo(map);
+    if (feature) {
+      openObjectDetails({ type: feature.properties.type, id: feature.properties.id, name: feature.properties.name, lat, lng });
+      return;
+    }
+    // Same AREA_RESOLVE_MINZOOM gate as the place-labels-hit/landuse/water
+    // branch above (2026-09-16) — skipped below it, straight to the plain
+    // coordinate card, rather than resolving a small-scale click into
+    // whichever huge park/district polygon happens to contain it.
+    if (map.getZoom() >= AREA_RESOLVE_MINZOOM) {
+      for (const kind of ["park", "district"]) {
+        const areaHit = await fetchAreaAt(kind, lat, lng);
+        if (areaHit.found) {
+          await renderResolvedArea(areaHit.type, areaHit.id, lat, lng);
+          return;
+        }
+      }
+    }
+    renderSelected({ type: "point", id: null, name: "Точка на карте", subtitle: "" }, null, { lat, lng });
   });
 
-  // ---- initial state from URL (?q=&type=) -------------------------------------------------
+  // ---- initial state from URL (?sel=type:id, or ?q=&type=) ---------------
+  // `?sel=` (2026-09-15 live report fix, see selectFromUrl/mapSelectHref
+  // above) takes priority over the older `?q=`/`type` text-search params
+  // when both are somehow present — it names an exact object, which is
+  // strictly more specific than a query that merely used to resolve to it.
   map.on("load", () => {
     const params = new URLSearchParams(location.search);
+    const sel = params.get("sel");
+    if (sel) {
+      const i = sel.indexOf(":");
+      if (i > 0) {
+        const selType = sel.slice(0, i);
+        const selId = decodeURIComponent(sel.slice(i + 1));
+        selectFromUrl(selType, selId);
+        return;
+      }
+    }
     const q = params.get("q");
     const type = params.get("type");
     if (type && FILTER_GROUP_OF[type] !== undefined) {

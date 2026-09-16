@@ -10,6 +10,16 @@ const {
   dedupeLabels,
 } = require("../lib/streetCluster");
 const { priorityRank } = require("../lib/housenumberProvenance");
+// 2026-09-16 (live report — unified map object card): feeds /api/area-at
+// below, the map's own resolution for a click on "place-labels-hit"
+// (quarters) or "landuse"/"water" (parks/gardens/forests/...) — neither
+// vector-tile layer carries our own table's primary key, only a bare OSM
+// `name` (place) or tags (landuse), so the click is resolved server-side by
+// testing the clicked point against the real boundary geometry already
+// used elsewhere (areasDirectory for districts/settlements, parksDirectory
+// for parks) instead of adding a second, tile-specific id scheme.
+const areasDirectory = require("../lib/areasDirectory");
+const parksDirectory = require("../lib/parksDirectory");
 
 const router = express.Router();
 
@@ -96,6 +106,44 @@ router.get("/hit-test", (req, res) => {
   }
 
   res.json({ type: "FeatureCollection", features: [] });
+});
+
+// GET /api/area-at?lat=&lng=&kind=district|park -> which real DB row (if
+// any) the clicked point actually falls inside, for a polygon-ish map layer
+// whose vector tile has no primary key of its own to hand back directly
+// (map-search.js's resolveAreaClick — see the require() comment above for
+// why this exists at all). `found:false` (200, not 404) is the normal,
+// expected answer for plenty of clicks — most of "landuse" is residential/
+// commercial/industrial/water with no page here at all, and districts/
+// settlements don't tile the entire municipality either (same caveat
+// areasDirectory.findContaining's own comment documents) — this is a
+// legitimate "nothing there", not an error.
+router.get("/area-at", (req, res) => {
+  const lat = parseFloat(req.query.lat);
+  const lng = parseFloat(req.query.lng);
+  const kind = req.query.kind;
+  if (!isFinite(lat) || !isFinite(lng)) return res.status(400).json({ error: "bad_coords" });
+
+  if (kind === "park") {
+    for (const p of parksDirectory.getAll()) {
+      if (p.geometry && pointInGeometry(lng, lat, p.geometry)) {
+        return res.json({ found: true, type: "park", id: p.id });
+      }
+    }
+    return res.json({ found: false });
+  }
+  if (kind === "district") {
+    // findContaining checks districts (the 121 OSM quarters "place-labels-
+    // hit" actually corresponds to) and, failing that, settlements — a
+    // point can legitimately be inside a settlement's own boundary instead
+    // of any district polygon (they don't fully tile the municipality
+    // either), and the map card handles both types identically either way.
+    const hit = areasDirectory.findContaining(lat, lng);
+    if (hit && hit.kind === "districts") return res.json({ found: true, type: "district", id: hit.id });
+    if (hit && hit.kind === "settlements") return res.json({ found: true, type: "settlement", id: hit.id });
+    return res.json({ found: false });
+  }
+  res.status(400).json({ error: "unknown_kind" });
 });
 
 const streetsByName = db.prepare(`SELECT osm_id, name, geometry FROM streets WHERE lower_u(name) = lower_u(@name)`);
@@ -260,12 +308,26 @@ router.get("/street/:id/houses", (req, res) => {
   }
 
   const LIMIT = 300;
-  const items = collapsed.slice(0, LIMIT).map(({ building: b, extraCount }) => ({
-    id: b.id, type: "address",
-    name: b.name || [withDesignation(first.name), b.housenumber].filter(Boolean).join(" "),
-    subtitle: b.housenumber ? `№ ${b.housenumber}${extraCount ? ` · ещё ${extraCount} ${recordsWord(extraCount)} того же адреса в исходных данных` : ""}` : "",
-    lat: b.lat, lng: b.lon, map_key: `address:${b.id}`,
-  }));
+  // 2026-09-15 live report, point 1 ("в чем смысл дубляжа номера дома?"):
+  // `name` already IS "<street> <number>" whenever the building has no name
+  // of its own (the common case) — the old subtitle repeated that exact
+  // number right back as "№ 49", telling the user nothing new. Subtitle now
+  // only carries information `name` doesn't already show: the street
+  // address itself, but ONLY when `b.name` exists and `name` is showing
+  // that real name instead of the address (otherwise it'd just be the same
+  // string twice again); and the "ещё N записей…" dedup note, unchanged.
+  const items = collapsed.slice(0, LIMIT).map(({ building: b, extraCount }) => {
+    const streetAddr = [withDesignation(first.name), b.housenumber].filter(Boolean).join(" ");
+    const parts = [];
+    if (b.name && streetAddr) parts.push(streetAddr);
+    if (extraCount) parts.push(`ещё ${extraCount} ${recordsWord(extraCount)} того же адреса в исходных данных`);
+    return {
+      id: b.id, type: "address",
+      name: b.name || streetAddr,
+      subtitle: parts.join(" · "),
+      lat: b.lat, lng: b.lon, map_key: `address:${b.id}`,
+    };
+  });
 
   res.json({
     meta: { name: withDesignation(first.name), total: collapsed.length, returned: items.length, partial: collapsed.length > items.length },

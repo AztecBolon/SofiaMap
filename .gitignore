@@ -27,3 +27,51 @@ meilisearch/
 # Local secret (Meilisearch master key) — see server/meili-env.bat's own
 # top comment. Never commit this file.
 server/meili-env.bat
+
+# Runtime logs (2026-09-14) — restart-server.bat/start-meilisearch.bat pipe
+# the server's and Meilisearch's full console output here for diagnosing
+# issues without watching a flickering console window (see
+# implementation-log.md, "Шестая волна"). They're appended to on every
+# restart, so they're always "dirty" from git's point of view and were
+# never meant to be versioned — pure local diagnostic output, not source.
+server.log
+meilisearch.log
+setup-meilisearch.log
+
+# Routing prototype (2026-09-16/17) — downloaded/built third-party routing
+# engines and their generated data: a full JDK runtime (one file alone,
+# lib/modules, is ~140MB), Valhalla's built tiles, Motis/OTP builds, a
+# downloaded GTFS feed archive, and debug inspection dumps (some files
+# hundreds of thousands of lines). Same reasoning as data/ and meilisearch/
+# above — none of it is source, all of it is downloaded or rebuilt by
+# routing-proto/routing-proto.ps1 and the setup/start .bat scripts, which
+# ARE source and stay tracked. A first commit accidentally swept ~2GB of
+# this in via `git add -A` before it was ever pushed — see
+# implementation-log.md for the cleanup.
+routing-proto/jdk/
+routing-proto/valhalla/
+routing-proto/motis/
+routing-proto/otp/
+routing-proto/gtfs_inspect/
+routing-proto/gtfs_static.zip
+routing-proto/logs/
+
+# Raw pipeline input (OSM extracts, ~280MB combined) — same reasoning as
+# data/: re-download/regenerate rather than version.
+raw/
+/*.pbf
+
+# Downloaded third-party tool, not source.
+planetiler.jar
+
+# Stray files from a botched command (2026-09-16/17), never real content —
+# safe to ignore.
+/.bat
+/real
+/the
+
+# More one-off diagnostic scratch (same reasoning as server.log et al.).
+server-diag.log
+setup-valhalla.log
+test-inner.log
+test-inner2.log

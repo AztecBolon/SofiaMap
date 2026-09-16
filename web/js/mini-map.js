@@ -34,6 +34,25 @@
       var expand = el.dataset.expand;
       if (!isFinite(lat) || !isFinite(lon)) return;
 
+      // 2026-09-15 (stop-cluster entity page): extra points besides the
+      // primary one, e.g. every other platform of the same physical stop —
+      // see htmlPage.js's miniMapWidget()`points` param. Parsed defensively
+      // since this is just a JSON attribute on the page, not a guaranteed
+      // shape.
+      var extraPoints = [];
+      if (el.dataset.points) {
+        try {
+          var parsed = JSON.parse(el.dataset.points);
+          if (Array.isArray(parsed)) {
+            extraPoints = parsed.filter(function (p) {
+              return p && isFinite(p.lat) && isFinite(p.lon);
+            });
+          }
+        } catch (e) {
+          extraPoints = [];
+        }
+      }
+
       // buildStyle()'s `glyphs` entry is deliberately a path RELATIVE to
       // the current page (see map-style.js's own comment on it) because
       // it's designed for /map/'s single static page. This widget can be
@@ -74,6 +93,20 @@
 
       map.on("load", function () {
         new maplibregl.Marker({ color: "#3B3FA6" }).setLngLat([lon, lat]).addTo(map);
+        extraPoints.forEach(function (p) {
+          new maplibregl.Marker({ color: "#8A8FD1", scale: 0.75 }).setLngLat([p.lon, p.lat]).addTo(map);
+        });
+        // Fixed center/zoom above is right for a single point; with extras,
+        // fit the view to every point instead so a spread-out cluster (e.g.
+        // several platforms strung along a road) doesn't render with half
+        // of them off-screen.
+        if (extraPoints.length) {
+          var bounds = new maplibregl.LngLatBounds([lon, lat], [lon, lat]);
+          extraPoints.forEach(function (p) {
+            bounds.extend([p.lon, p.lat]);
+          });
+          map.fitBounds(bounds, { padding: 28, maxZoom: 16, duration: 0 });
+        }
       });
 
       map.on("error", function (e) {

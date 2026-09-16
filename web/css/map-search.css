@@ -56,6 +56,12 @@ html, body { margin: 0; height: 100%; font-family: 'Golos Text', -apple-system, 
 .map-search-related__more { display: inline-block; margin-top: 4px; padding: 0; border: 0; background: none; color: #2E3389; font-size: 12px; font-weight: 600; cursor: pointer; }
 .map-search-related__more:hover { text-decoration: underline; }
 
+/* 2026-09-15 (stop-cluster entity page) — explanatory note in place of the
+   per-row links a stop's grouped platforms no longer carry (see
+   map-search.js's relatedBlock()). Same tone/sizing as
+   .map-search-namesakes__note's own explanatory line. */
+.map-search-related__note { margin: 0 0 6px; font-size: 12px; color: #666; line-height: 1.5; }
+
 /* 2026-09-14 (claude/next-steps-rubric-grouping.md, second wave) — the same
    block reused for a rubric's "Организации" preview adds a second action
    ("Показать все на карте") next to "Показать все N", so both buttons sit
@@ -88,10 +94,21 @@ html, body { margin: 0; height: 100%; font-family: 'Golos Text', -apple-system, 
 .map-selected-card { padding: 16px 18px 22px; }
 .map-selected-back { margin-bottom: 16px; padding: 0; border: 0; background: none; color: #2E3389; font-size: 13px; cursor: pointer; }
 .map-selected-back:hover { text-decoration: underline; }
-.map-selected-type { display: block; margin-bottom: 5px; color: #777; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .map-selected-card h2 { margin: 0 0 8px; font-size: 18px; }
 .map-selected-card p { margin: 0 0 6px; color: #555; font-size: 13px; line-height: 1.5; }
 .map-selected-card a.map-selected-link { color: #2E3389; font-size: 13px; }
+/* 2026-09-16 (live report — unified object card): coordinates line, shown
+   on every card that has a real anchor point (see map-search.js's
+   renderSelected/coordsHtml). */
+.map-selected-coords { margin: 0 0 10px; color: #888; font-size: 12px; }
+/* 2026-09-15 live report point 3: compact "Как добраться" preview inside
+   the object card (map-search.js's directionsHtml) — boxed off from the
+   plain name/subtitle text above it so it reads as its own short block,
+   not more running prose. Full detail (every nearby stop) stays on the
+   object's own page. */
+.map-selected-transport { margin: 4px 0 12px; padding: 10px 12px; background: #F7F7FB; border-radius: 8px; }
+.map-selected-transport__title { margin: 0 0 5px; color: #777; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.map-selected-transport__row { font-size: 12.5px; color: #333; line-height: 1.6; }
 .map-route-stops { margin-top: 14px; }
 .map-route-stop { display: flex; gap: 9px; padding: 7px 0; border-top: 1px solid #eee; font-size: 12.5px; }
 .map-route-stop span { flex: 0 0 22px; color: #888; text-align: right; }
@@ -99,6 +116,19 @@ html, body { margin: 0; height: 100%; font-family: 'Golos Text', -apple-system, 
 .map-selected-directions { margin: 10px 0; display: flex; gap: 6px; flex-wrap: wrap; }
 .map-selected-directions button { padding: 6px 10px; border: 1px solid #ddd; border-radius: 14px; background: #fff; font-size: 12px; cursor: pointer; }
 .map-selected-directions button.is-active { border-color: #3B3FA6; background: #EFEFFB; color: #2E3389; }
+.map-selected-directions button:hover { border-color: #3B3FA6; background: #EFEFFB; color: #2E3389; }
+.map-selected-directions button:disabled { opacity: .6; cursor: default; background: #fff; border-color: #ddd; color: inherit; }
+/* 2026-09-16 (claude/next-steps-walkability-isochrone.md): "Зона
+   доступности" toggle button reuses .map-selected-directions' pill look
+   (own row, directly under the route buttons) — its own class only exists
+   for the margin tweak below (two directions rows back-to-back would
+   otherwise double up the 10px top margin). */
+.map-selected-isochrone { margin-top: 0; }
+.map-isochrone-status { margin: 4px 0 10px; font-size: 12.5px; color: #6a737d; }
+.map-isochrone-status.is-error { color: #b3261e; }
+.map-isochrone-legend { display: flex; gap: 12px; flex-wrap: wrap; margin: 4px 0 12px; font-size: 12px; color: #555; }
+.map-isochrone-legend__item { display: inline-flex; align-items: center; gap: 5px; }
+.map-isochrone-legend__item i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; flex: none; }
 
 .map-rubric-head { padding: 16px 18px 12px; border-bottom: 1px solid #eee; }
 .map-rubric-head strong { display: block; color: #2E3389; font-size: 11px; text-transform: uppercase; margin-bottom: 4px; }
@@ -126,10 +156,80 @@ html, body { margin: 0; height: 100%; font-family: 'Golos Text', -apple-system, 
 .map-search-route-open { display: block; width: 100%; margin-top: 12px; padding: 9px 12px; border: 1px solid #3B3FA6; border-radius: 7px; background: #fff; color: #2E3389; font-size: 12.5px; font-weight: 600; cursor: pointer; }
 .map-search-route-open:hover { background: #EFEFFB; }
 
-.map-route-stub { padding: 16px 18px; }
-.map-route-stub h2 { margin: 0 0 10px; font-size: 16px; }
-.map-route-stub p { color: #666; font-size: 13px; line-height: 1.55; margin: 0 0 10px; }
-.map-route-stub .badge { display: inline-block; padding: 3px 8px; border-radius: 10px; background: #fff7df; color: #77641e; font-size: 11px; font-weight: 600; margin-bottom: 10px; }
+/* "Как доехать/как дойти" route panel (2026-09-16) — replaces the earlier
+   "Скоро" stub (see claude/next-steps-routing.md). Two point slots (А/Б,
+   filled either by search-by-name against Motis' own geocoder or by
+   clicking the map), an itinerary summary/switcher, and the legend (points
+   + per-leg minutes) the original request asked for. */
+.map-route-panel { padding: 16px 18px 22px; }
+.map-route-panel h2 { margin: 0 0 12px; font-size: 16px; }
+.map-route-points-input { display: grid; grid-template-columns: 1fr auto; gap: 8px 10px; align-items: start; margin-bottom: 14px; }
+.map-route-swap {
+  grid-row: 1 / 3; align-self: center; width: 30px; height: 30px; border: 1px solid #ddd; border-radius: 50%;
+  background: #fff; color: #2E3389; font-size: 14px; cursor: pointer; line-height: 1;
+}
+.map-route-swap:hover:not(:disabled) { border-color: #3B3FA6; background: #EFEFFB; }
+.map-route-swap:disabled { opacity: .35; cursor: not-allowed; }
+.map-route-point-slot { padding: 8px 10px; border: 1px solid #eee; border-radius: 8px; background: #fafafa; }
+.map-route-point-slot.is-filled { display: flex; align-items: center; gap: 8px; background: #F7F7FB; border-color: #e2e2f2; }
+.map-route-point-slot.is-picking { border-color: #3B3FA6; background: #EFEFFB; }
+.map-route-point-slot__label { flex: 0 0 auto; color: #888; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.map-route-point-slot__name { flex: 1 1 auto; font-size: 13px; color: #222; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-route-point-slot__clear { flex: 0 0 auto; border: 0; background: none; color: #999; font-size: 13px; cursor: pointer; padding: 2px 4px; }
+.map-route-point-slot__clear:hover { color: #a8631a; }
+.map-route-point-slot:not(.is-filled) .map-route-point-slot__label { display: block; margin-bottom: 6px; }
+.map-route-search { margin-bottom: 6px; }
+.map-route-search__input { width: 100%; height: 32px; border: 1px solid #ddd; border-radius: 6px; padding: 0 9px; font-size: 12.5px; }
+.map-route-search__input:focus { outline: 0; border-color: #3B3FA6; }
+.map-route-search-list:not(:empty) { margin-top: 4px; border: 1px solid #eee; border-radius: 6px; overflow: hidden; }
+.map-route-search-item { display: block; width: 100%; padding: 6px 9px; border: 0; border-bottom: 1px solid #f0f0f0; background: #fff; text-align: left; cursor: pointer; }
+.map-route-search-item:last-child { border-bottom: 0; }
+.map-route-search-item:hover { background: #EFEFFB; }
+.map-route-search-item__name { display: block; font-size: 12.5px; color: #222; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-route-search-item__sub { display: block; font-size: 11px; color: #999; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-route-search-empty { padding: 7px 9px; color: #999; font-size: 12px; }
+/* 2026-09-16: replaces the old .map-route-pick-btn ("Выбрать на карте") --
+   see pointSlotHtml/updatePickingHighlight in map-search.js. Plain text,
+   nothing to press; its wording (not a button label anymore) is what flips
+   between the armed/unarmed phrasing now. */
+.map-route-point-slot__hint { margin: 2px 0 0; padding: 0; font-size: 11.5px; color: #999; line-height: 1.35; }
+.map-route-point-slot.is-picking .map-route-point-slot__hint { color: #3B3FA6; font-weight: 600; }
+
+/* Follows the raw cursor position while a route point is being picked on
+   the map (map.on("mousemove") in map-search.js) -- names which slot
+   ("от"/"до") the next click will fill. Fixed positioning + pointer-events:
+   none so it tracks the real viewport, not a map coordinate, and never
+   itself becomes a click target. */
+.map-route-pick-label {
+  position: fixed; z-index: 1000; display: none; pointer-events: none;
+  background: #3B3FA6; color: #fff; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .03em; padding: 3px 8px;
+  border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,.25);
+}
+
+.map-route-hint { color: #666; font-size: 13px; line-height: 1.5; }
+
+.map-route-summary { padding: 10px 12px; background: #F7F7FB; border-radius: 8px; font-size: 13px; color: #333; margin-bottom: 8px; }
+.map-route-summary strong { color: #2E3389; font-size: 15px; }
+.map-route-itin-switch { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; }
+.map-route-itin-switch button { padding: 5px 10px; border: 1px solid #ddd; border-radius: 12px; background: #fff; font-size: 12px; cursor: pointer; }
+.map-route-itin-switch button.is-active { border-color: #3B3FA6; background: #3B3FA6; color: #fff; }
+
+.map-route-block-title { margin: 14px 0 6px; color: #888; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.map-route-point { display: flex; align-items: baseline; gap: 8px; padding: 5px 0; font-size: 12.5px; color: #333; }
+.map-route-point__dot { flex: 0 0 auto; width: 10px; height: 10px; border-radius: 50%; box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(0,0,0,.08); }
+.map-route-point--start .map-route-point__dot { background: #2f7a44; }
+.map-route-point--board .map-route-point__dot { background: #1874b0; }
+.map-route-point--transfer .map-route-point__dot { background: #a8631a; }
+.map-route-point--alight .map-route-point__dot { background: #3B3FA6; }
+.map-route-point--end .map-route-point__dot { background: #2E3389; }
+.map-route-point__text strong { color: #555; }
+
+.map-route-leg { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid #f0f0f0; font-size: 12.5px; }
+.map-route-leg:first-child { border-top: 0; }
+.map-route-leg__swatch { flex: 0 0 auto; width: 14px; height: 5px; border-radius: 3px; }
+.map-route-leg__text { flex: 1 1 auto; color: #333; }
+.map-route-leg__time { flex: 0 0 auto; color: #888; font-size: 12px; }
 
 .map-click-popup { min-width: 220px; padding: 14px 16px; font-size: 13px; }
 .map-click-popup h3 { margin: 0 0 6px; font-size: 15px; }

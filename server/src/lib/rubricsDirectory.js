@@ -15,7 +15,16 @@ const DEFAULT_NEARBY_RADIUS_M = 500;
 let rubricListCache = null;
 function listRubrics() {
   if (rubricListCache) return rubricListCache;
-  const rows = db.prepare(`SELECT rubric AS name, COUNT(*) AS count FROM organizations WHERE rubric != '' GROUP BY rubric ORDER BY rubric COLLATE NOCASE`).all();
+  // 2026-09-15 (Point 2 of the "organizations without catalog data"
+  // migration — claude/implementation-log.md): `cluster_of` (added by that
+  // migration's patch) marks a row as one MEMBER LOCATION of a same-name
+  // city-wide chain (e.g. one of several "Фантастико" branches migrated from
+  // addressless buildings), not a canonical standalone organization — it
+  // rides along on its cluster's primary row (see getClusterMembers below)
+  // instead of counting as its own catalog entry. Excluded here so a
+  // rubric's count/page-count reflects only real, independently-listed
+  // entries.
+  const rows = db.prepare(`SELECT rubric AS name, COUNT(*) AS count FROM organizations WHERE rubric != '' AND cluster_of IS NULL GROUP BY rubric ORDER BY rubric COLLATE NOCASE`).all();
   const assign = createSlugAssigner();
   rubricListCache = rows.map((r) => ({ ...r, slug: assign(r.name), pageCount: Math.ceil(r.count / PAGE_SIZE) }));
   return rubricListCache;
@@ -34,14 +43,46 @@ function getCompaniesForRubric(rubric) {
   // fetched here (not a separate by-id query) so the organization detail
   // page reads them straight off the same cached row every list page
   // already builds, no second query needed.
+  // `cluster_of IS NULL` — see listRubrics()'s comment above: a cluster
+  // member isn't its own listing, so it never gets a slug/page of its own
+  // here (nothing has ever linked to one, since this migration is the only
+  // thing that ever creates a `cluster_of` row) — its primary's page shows
+  // it instead (see getClusterMembers).
   const rows = db.prepare(`
     SELECT id, name, addr_street, housenumber, lat, lon, phone, website, email, opening_hours, wheelchair FROM organizations
-    WHERE rubric = @rubric ORDER BY name COLLATE NOCASE, id
+    WHERE rubric = @rubric AND cluster_of IS NULL ORDER BY name COLLATE NOCASE, id
   `).all({ rubric: rubric.name });
   const assign = createSlugAssigner();
   const companies = rows.map((r) => ({ ...r, slug: assign(r.name, `org-${r.id}`) }));
   companiesCache.set(rubric.name, companies);
   return companies;
+}
+
+// 2026-09-15 (Point 2 migration, see listRubrics() comment above): every
+// OTHER real location of a city-wide-clustered chain (e.g. the other 6
+// "Фантастико" branches migrated alongside id 900011) — used by the
+// organization detail page to list "Другие адреса сети «Х»" and by
+// search.js to attach a `related`/`related_total` preview to the primary's
+// result, mirroring the stop-cluster pattern (stopsDirectory.js) rather than
+// inventing a second shape for the same "one entity, several real points"
+// idea.
+// Prepared lazily (on first call, not at module load) — same reason every
+// other patch-dependent query in this file already is: this module can load
+// before db.js's applyPendingPatches has run against a database that
+// predates the `cluster_of` column (e.g. a fresh reassembly from
+// sofia.db.gz.*.part, or any script that requires this module before the
+// server's own startup sequence applies patches), and a top-level
+// `db.prepare` referencing a not-yet-existing column would throw immediately
+// on require(), not just when actually queried.
+let getClusterMembersStmt = null;
+function getClusterMembers(primaryId) {
+  if (!getClusterMembersStmt) {
+    getClusterMembersStmt = db.prepare(`
+      SELECT id, name, addr_street, housenumber, lat, lon FROM organizations
+      WHERE cluster_of = ? ORDER BY name COLLATE NOCASE, id
+    `);
+  }
+  return getClusterMembersStmt.all(primaryId);
 }
 
 function getCompanyPage(rubric, page) {
@@ -155,7 +196,7 @@ module.exports = {
   // wasn't exported yet, since until now every external caller only ever
   // needed a page of it (`getCompanyPage`) or one company by id
   // (`getCompanyLink`).
-  listRubrics, getRubricBySlug, getCompaniesForRubric, getCompanyPage, findCompanyBySlug, getCompanyLink,
+  listRubrics, getRubricBySlug, getCompaniesForRubric, getCompanyPage, findCompanyBySlug, getCompanyLink, getClusterMembers,
   getNearbyByRubric, getNearbyForRubric, getNearbyByRubricForGeometry, getNearbyForRubricByGeometry,
   DEFAULT_NEARBY_RADIUS_M, PAGE_SIZE,
 };

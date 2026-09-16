@@ -41,6 +41,16 @@ const ICONS = {
   grid: (size) => svg('<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>', { size }),
   info: (size) => svg('<circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><circle cx="12" cy="7.5" r=".9" fill="currentColor" stroke="none"/>', { size }),
   warning: (size) => svg('<path d="M12 3 2 20h20L12 3z"/><path d="M12 10v5"/><circle cx="12" cy="17.5" r=".9" fill="currentColor" stroke="none"/>', { size }),
+
+  // ---- homepage section cards (2026-09-15 homepage redesign) ----
+  road: (size) => svg('<path d="M8 3 4 21"/><path d="M16 3l4 18"/><path d="M12 3v3M12 9.5v3M12 16v3"/>', { size }),
+  flag: (size) => svg('<path d="M6 21V4"/><path d="M6 5h11l-3 4 3 4H6"/>', { size }),
+  hexagon: (size) => svg('<path d="M12 3 4.5 7.5v9L12 21l7.5-4.5v-9L12 3z"/>', { size }),
+  home: (size) => svg('<path d="M4 10.5 12 4l8 6.5"/><path d="M6 9.5V20h12V9.5"/><path d="M10 20v-6h4v6"/>', { size }),
+  mail: (size) => svg('<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>', { size }),
+
+  // ---- /raions/ + /parks/ sections (2026-09-15) ----
+  tree: (size) => svg('<path d="M12 3 6 11h3l-4 6h4v4h6v-4h4l-4-6h3L12 3z"/>', { size }),
 };
 
 module.exports = { icon: (name, size) => (ICONS[name] ? ICONS[name](size) : ""), ICONS };
